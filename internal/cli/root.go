@@ -30,7 +30,7 @@ func Execute() int {
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().StringVarP(&cfgPath, "config", "c", envOr("SCRIVEN_CONFIG", config.DefaultPath), "settings file")
-	root.AddCommand(initCmd(), configCmd(), captureCmd())
+	root.AddCommand(initCmd(), configCmd(), captureCmd(), watchCmd(), sweepCmd())
 	if err := root.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1

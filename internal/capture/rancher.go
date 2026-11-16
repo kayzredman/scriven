@@ -79,8 +79,72 @@ func excludedNamespace(ns string, extra []string) bool {
 	return false
 }
 
+// Filter decides, identically for a full capture and for the watcher, which
+// objects scriven captures.
+type Filter struct {
+	ExcludeNamespaces []string
+	ExcludeKinds      []string
+}
+
+type Verdict int
+
+const (
+	Ignore  Verdict = iota // system object: not captured and not reported
+	Skip                   // seen but left out; Reason says why
+	Helm                   // managed by a Helm release
+	Capture                // captured
+)
+
+type Decision struct {
+	Verdict Verdict
+	Reason  string
+	Release HelmRelease // set for Helm
+}
+
+// WatchableKind reports whether scriven captures this kind at all.
+func (f Filter) WatchableKind(r k8s.Resource) bool {
+	if skipKinds[r.Kind] || strings.HasSuffix(r.GVR.Group, "metrics.k8s.io") || slices.Contains(f.ExcludeKinds, r.Kind) {
+		return false
+	}
+	return true
+}
+
+func (f Filter) Decide(r k8s.Resource, o unstructured.Unstructured) Decision {
+	ns, name := o.GetNamespace(), o.GetName()
+	switch {
+	case !f.WatchableKind(r):
+		return Decision{Verdict: Ignore}
+	case ns != "" && excludedNamespace(ns, f.ExcludeNamespaces):
+		return Decision{Verdict: Ignore} // system namespaces: too many objects to list as skipped
+	case r.Kind == "Namespace" && excludedNamespace(name, f.ExcludeNamespaces):
+		return Decision{Verdict: Ignore}
+	case isAutoCreated(r.Kind, ns, name), systemClusterObject(o):
+		return Decision{Verdict: Ignore}
+	}
+	if ref := controllerOwner(o); ref != "" {
+		return Decision{Verdict: Skip, Reason: "owned by controller " + ref}
+	}
+	if rel := o.GetAnnotations()["meta.helm.sh/release-name"]; rel != "" || o.GetLabels()["app.kubernetes.io/managed-by"] == "Helm" {
+		relNS := o.GetAnnotations()["meta.helm.sh/release-namespace"]
+		if rel == "" {
+			rel = o.GetLabels()["app.kubernetes.io/instance"]
+		}
+		if relNS == "" {
+			relNS = ns
+		}
+		if relNS != "" && excludedNamespace(relNS, f.ExcludeNamespaces) {
+			return Decision{Verdict: Ignore} // cluster-scoped part of a system chart, e.g. k3s's Traefik
+		}
+		return Decision{Verdict: Helm, Release: HelmRelease{Name: rel, Namespace: relNS, Chart: o.GetLabels()["helm.sh/chart"]}}
+	}
+	if _, ok := typedResources[r.GVR.Group+"/"+r.Kind]; !ok {
+		return Decision{Verdict: Skip, Reason: "no typed Terraform resource for " + r.APIVersion() + " " + r.Kind}
+	}
+	return Decision{Verdict: Capture}
+}
+
 // DiscoverKubernetes lists every capturable object in the cluster.
-func DiscoverKubernetes(ctx context.Context, c *k8s.Client, excludeNS []string) (*Discovery, error) {
+func DiscoverKubernetes(ctx context.Context, c *k8s.Client, f Filter) (*Discovery, error) {
 	resources, err := c.ListableResources()
 	if err != nil {
 		return nil, fmt.Errorf("discovery: %w", err)
@@ -88,7 +152,7 @@ func DiscoverKubernetes(ctx context.Context, c *k8s.Client, excludeNS []string) 
 	d := &Discovery{}
 	helm := map[string]*HelmRelease{}
 	for _, r := range resources {
-		if skipKinds[r.Kind] || strings.HasSuffix(r.GVR.Group, "metrics.k8s.io") {
+		if !f.WatchableKind(r) {
 			continue
 		}
 		items, forbidden, err := c.List(ctx, r)
@@ -100,51 +164,24 @@ func DiscoverKubernetes(ctx context.Context, c *k8s.Client, excludeNS []string) 
 			continue
 		}
 		for _, o := range items {
-			ns, name := o.GetNamespace(), o.GetName()
-			id := name
-			if ns != "" {
-				id = ns + "/" + name
-			}
-			skip := func(reason string) { d.Skipped = append(d.Skipped, Skipped{r.Kind, id, reason}) }
-
-			switch {
-			case ns != "" && excludedNamespace(ns, excludeNS):
-				continue // system namespaces: not even listed as skipped, there are too many
-			case r.Kind == "Namespace" && excludedNamespace(name, excludeNS):
-				continue
-			case isAutoCreated(r.Kind, ns, name):
-				continue
-			case systemClusterObject(o):
-				continue
-			}
-			if ref := controllerOwner(o); ref != "" {
-				skip("owned by controller " + ref)
-				continue
-			}
-			if rel := o.GetAnnotations()["meta.helm.sh/release-name"]; rel != "" || o.GetLabels()["app.kubernetes.io/managed-by"] == "Helm" {
-				relNS := o.GetAnnotations()["meta.helm.sh/release-namespace"]
-				if rel == "" {
-					rel = o.GetLabels()["app.kubernetes.io/instance"]
-				}
-				if relNS == "" {
-					relNS = ns
-				}
-				if relNS != "" && excludedNamespace(relNS, excludeNS) {
-					continue // cluster-scoped part of a system chart, e.g. k3s's Traefik
-				}
-				k := relNS + "/" + rel
+			dec := f.Decide(r, o)
+			switch dec.Verdict {
+			case Skip:
+				d.Skipped = append(d.Skipped, Skipped{r.Kind, objectID(o), dec.Reason})
+			case Helm:
+				k := dec.Release.Namespace + "/" + dec.Release.Name
 				h := helm[k]
 				if h == nil {
-					h = &HelmRelease{Name: rel, Namespace: relNS}
+					h = &HelmRelease{Name: dec.Release.Name, Namespace: dec.Release.Namespace}
 					helm[k] = h
 				}
-				if ch := o.GetLabels()["helm.sh/chart"]; ch != "" && h.Chart == "" {
-					h.Chart = ch
+				if h.Chart == "" {
+					h.Chart = dec.Release.Chart
 				}
 				h.Objects++
-				continue
+			case Capture:
+				d.Objects = append(d.Objects, Discovered{Res: r, Obj: o})
 			}
-			d.Objects = append(d.Objects, Discovered{Res: r, Obj: o})
 		}
 	}
 	for _, h := range helm {
@@ -155,6 +192,14 @@ func DiscoverKubernetes(ctx context.Context, c *k8s.Client, excludeNS []string) 
 	})
 	sort.SliceStable(d.Objects, func(i, j int) bool { return addrName(d.Objects[i]) < addrName(d.Objects[j]) })
 	return d, nil
+}
+
+// objectID is "namespace/name", or "name" for cluster-scoped objects.
+func objectID(o unstructured.Unstructured) string {
+	if ns := o.GetNamespace(); ns != "" {
+		return ns + "/" + o.GetName()
+	}
+	return o.GetName()
 }
 
 func controllerOwner(o unstructured.Unstructured) string {

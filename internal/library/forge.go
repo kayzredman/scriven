@@ -22,6 +22,8 @@ type Forge interface {
 	// Supersede closes open PRs whose branch starts with prefix, except keep, and
 	// returns their numbers. Used so only the newest capture of a target is open.
 	Supersede(ctx context.Context, prefix string, keep PR) ([]int, error)
+	// FindOpenPR returns the open PR from branch head, if there is one.
+	FindOpenPR(ctx context.Context, head string) (PR, bool, error)
 }
 
 type PR struct {
@@ -335,3 +337,52 @@ func (g *gitlab) Supersede(ctx context.Context, prefix string, keep PR) ([]int, 
 }
 
 func (noAPI) Supersede(context.Context, string, PR) ([]int, error) { return nil, ErrNoAPI }
+
+func (g *gitea) FindOpenPR(ctx context.Context, head string) (PR, bool, error) {
+	var open []struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+		Head    struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+	}
+	if _, err := g.do(ctx, "GET", fmt.Sprintf("/repos/%s/%s/pulls?state=open&limit=50", g.owner, g.repo), nil, &open); err != nil {
+		return PR{}, false, err
+	}
+	for _, p := range open {
+		if p.Head.Ref == head {
+			return PR{p.Number, p.HTMLURL}, true, nil
+		}
+	}
+	return PR{}, false, nil
+}
+
+func (g *github) FindOpenPR(ctx context.Context, head string) (PR, bool, error) {
+	var open []struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	}
+	if _, err := g.do(ctx, "GET", fmt.Sprintf("/repos/%s/%s/pulls?state=open&head=%s:%s", g.owner, g.repo, g.owner, url.QueryEscape(head)), nil, &open); err != nil {
+		return PR{}, false, err
+	}
+	if len(open) == 0 {
+		return PR{}, false, nil
+	}
+	return PR{open[0].Number, open[0].HTMLURL}, true, nil
+}
+
+func (g *gitlab) FindOpenPR(ctx context.Context, head string) (PR, bool, error) {
+	var open []struct {
+		IID    int    `json:"iid"`
+		WebURL string `json:"web_url"`
+	}
+	if _, err := g.do(ctx, "GET", "/projects/"+g.project+"/merge_requests?state=opened&source_branch="+url.QueryEscape(head), nil, &open); err != nil {
+		return PR{}, false, err
+	}
+	if len(open) == 0 {
+		return PR{}, false, nil
+	}
+	return PR{open[0].IID, open[0].WebURL}, true, nil
+}
+
+func (noAPI) FindOpenPR(context.Context, string) (PR, bool, error) { return PR{}, false, ErrNoAPI }

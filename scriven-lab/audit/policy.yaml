@@ -1,0 +1,20 @@
+# Kubernetes audit policy for the lab: record who writes what, skip the noise.
+# The API server sends these events to scriven's audit webhook so drift
+# notifications can name the user who made a change.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages: [RequestReceived, ResponseStarted]
+rules:
+  - level: None
+    resources:
+      - group: ""
+        resources: [events, endpoints]
+      - group: coordination.k8s.io
+        resources: [leases]
+      - group: discovery.k8s.io
+        resources: [endpointslices]
+  - level: None
+    userGroups: ["system:nodes"]
+  - level: Metadata
+    verbs: [create, update, patch, delete]
+  - level: None

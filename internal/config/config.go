@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -24,6 +25,30 @@ type Config struct {
 	Notify      Notify               `yaml:"notify"`
 	MergePolicy map[string]MergeRule `yaml:"merge_policy"`
 	Vault       *Vault               `yaml:"vault,omitempty"`
+	Watch       Watch                `yaml:"watch,omitempty"`
+}
+
+// Watch tunes `scriven watch` and `scriven sweep`. Every field has a default.
+type Watch struct {
+	// How long a resource must be quiet before it is re-captured, so a burst
+	// of edits becomes one capture. Go duration, default 15s.
+	Debounce string `yaml:"debounce,omitempty"`
+	// Address for the Kubernetes audit webhook (e.g. ":8099"). When set, the API
+	// server pushes audit events here and notifications name the user who made
+	// each change. Empty: notifications name the tool (field manager) only.
+	AuditListen string `yaml:"audit_listen,omitempty"`
+	// Daily full sweep time, local "HH:MM", to catch anything the watch missed.
+	// Empty disables the in-process sweep (run `scriven sweep` from cron instead).
+	SweepAt string `yaml:"sweep_at,omitempty"`
+	// Kinds never watched or captured, e.g. [ConfigMap].
+	ExcludeKinds []string `yaml:"exclude_kinds,omitempty"`
+}
+
+func (w Watch) DebounceDuration() time.Duration {
+	if d, err := time.ParseDuration(w.Debounce); err == nil && d > 0 {
+		return d
+	}
+	return 15 * time.Second
 }
 
 type Scope struct {
@@ -230,6 +255,17 @@ func (c *Config) Validate() error {
 			}
 		default:
 			add("notify.channels: %q is not one of %v", ch, Channels)
+		}
+	}
+
+	if c.Watch.Debounce != "" {
+		if d, err := time.ParseDuration(c.Watch.Debounce); err != nil || d <= 0 {
+			add("watch.debounce: %q is not a positive duration such as 15s", c.Watch.Debounce)
+		}
+	}
+	if c.Watch.SweepAt != "" {
+		if _, err := time.Parse("15:04", c.Watch.SweepAt); err != nil {
+			add("watch.sweep_at: %q is not a time such as 02:00", c.Watch.SweepAt)
 		}
 	}
 

@@ -59,7 +59,7 @@ func captureCmd() *cobra.Command {
 				}
 			}
 			res, err := capture.Run(cmd.Context(), t, capture.Options{
-				ExcludeNamespaces: c.Scope.ExcludeNamespaces, KeepWorkdir: keep, Progress: progress})
+				Filter: capture.FilterFor(c), KeepWorkdir: keep, Progress: progress})
 			if err != nil {
 				return err
 			}

@@ -16,10 +16,24 @@ done
 echo "==> Starting support services"
 docker compose "${PROFILE_ARGS[@]}" up -d
 
+echo "==> Audit webhook config (sends API audit events to scriven watch on the host, port 8099)"
+# A named volume, not a bind mount: k3d volume paths break on Windows drive letters and spaces.
+docker volume create scriven-audit >/dev/null
+for c in prod-sim dev-sim; do
+  sed "s/__TARGET__/$c/" audit/webhook.kubeconfig.tmpl > "audit/.webhook-$c.kubeconfig"
+done
+MSYS_NO_PATHCONV=1 docker run --rm -v scriven-audit:/cfg -v "$(pwd)/audit:/src:ro" busybox \
+  sh -c "cp /src/policy.yaml /src/.webhook-*.kubeconfig /cfg/"
+
 echo "==> Creating k3d clusters on the shared network"
 for c in prod-sim dev-sim; do
   if ! k3d cluster list "$c" >/dev/null 2>&1; then
-    k3d cluster create "$c" --network scriven-lab --agents 1 --wait
+    # The audit webhook only sends events; if scriven isn't listening the API server drops them.
+    k3d cluster create "$c" --network scriven-lab --agents 1 --wait \
+      --volume "scriven-audit:/etc/scriven-audit@server:0" \
+      --k3s-arg "--kube-apiserver-arg=audit-policy-file=/etc/scriven-audit/policy.yaml@server:0" \
+      --k3s-arg "--kube-apiserver-arg=audit-webhook-config-file=/etc/scriven-audit/.webhook-$c.kubeconfig@server:0" \
+      --k3s-arg "--kube-apiserver-arg=audit-webhook-batch-max-wait=2s@server:0"
   fi
 done
 

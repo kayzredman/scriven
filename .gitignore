@@ -15,3 +15,4 @@ scriven-lab/.lab/
 
 # Local Scriven config used against the lab
 /scriven.yaml
+scriven-lab/audit/.webhook-*

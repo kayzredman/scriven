@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -148,6 +149,7 @@ func (t *tf) planZeroDiff(ctx context.Context, byAddr map[string]Discovered) (*P
 			}
 			if len(real) == 0 && len(notes) > 0 {
 				r.NoOps++
+				sort.Strings(notes)
 				r.ProviderOnly = append(r.ProviderOnly, rc.Address+": "+strings.Join(notes, "; "))
 				continue
 			}

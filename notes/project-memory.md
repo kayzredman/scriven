@@ -28,3 +28,18 @@ What has been decided about this project so far. Started on 2026-11-16 and last 
 - Whiteboard: https://claude.ai/artifact/2k5PT6qfjPKLcHDGrdw9AF
 
 The online Blueprint and Whiteboard still describe the tfk8s / manifest route for Rancher. Update them when convenient.
+
+## Phase 3 build: watcher (2026-11-16)
+
+- **Feed:** Kubernetes informers per captured kind, using the same `Filter.Decide` as a full capture. Changes are compared by a hash of what a capture would write, so status, `resourceVersion`, `managedFields`, the revision annotation and HPA-owned `replicas` are ignored.
+- **Single-resource re-capture:** only changed objects go through import, generate, clean-up and the zero-diff plan. Their blocks are merged into the library files. Every capture path writes one canonical sorted layout (`joinBlocks`), so watcher commits and full sweeps produce byte-identical files. A sweep straight after the watcher has run reports "up to date".
+- **Library flow:** the `observed` branch gets one commit per resource, and one PR `observed` → `main` stays open. Once everything on `observed` is merged, it restarts from `main`. If it can't merge `main` cleanly, it resets to `main` with a force push, and the next sweep re-detects anything still different.
+- **Who changed it:** the API server audit webhook pushes to `scriven watch` at `/audit/<target-id>`. This is push-based with no node access, and if Scriven is down the API server just drops the events. The audit event supplies the user, tool and action. `managedFields` is only a fallback, because the API server leaves `scale` writes untimed and the latest timestamped manager is then wrong.
+- **Expected vs drift:** "expected" when the writer's user agent is Terraform, otherwise "drift". There is no record of planned Terraform runs yet.
+- **Lab:** the k3d clusters are created with the audit policy and webhook config from a named Docker volume (`scriven-audit`). Bind mounts break on Windows paths with drive letters and spaces. Webhook target: `host.k3d.internal:8099`.
+- **Not done yet:**
+  - Container image plus Deployment/CronJob manifests for running in-cluster.
+  - Prometheus metrics.
+  - Per-environment notification routing.
+  - `catalog.yaml` isn't updated by watcher commits (sweeps refresh it).
+  - The capture's own cleanup still writes HPA-managed `replicas`, so a sweep can report replica drift on autoscaled workloads.

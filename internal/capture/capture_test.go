@@ -1,6 +1,8 @@
 package capture
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -131,4 +133,56 @@ func TestAddrName(t *testing.T) {
 	if got := addrName(d); got != "r_9_web_v2" {
 		t.Errorf("addrName = %q", got)
 	}
+}
+
+func TestApplyChangesMatchesFullCapture(t *testing.T) {
+	dir := t.TempDir()
+	a := []byte("resource \"kubernetes_service_v1\" \"shop_a\" {\n  x = 1\n}\n")
+	b := []byte("resource \"kubernetes_config_map_v1\" \"shop_b\" {\n  y = 2\n}\n")
+	ia := []byte("import {\n  to = kubernetes_service_v1.shop_a\n  id = \"shop/a\"\n}\n")
+	ib := []byte("import {\n  to = kubernetes_config_map_v1.shop_b\n  id = \"shop/b\"\n}\n")
+	full := func(res, imp map[string][]byte) (string, string) {
+		return string(joinBlocks(res, mainHeader)), string(joinBlocks(imp, ""))
+	}
+	m0, i0 := full(map[string][]byte{"kubernetes_service_v1.shop_a": a}, map[string][]byte{"kubernetes_service_v1.shop_a": ia})
+	writeFile(t, dir, "main.tf", m0)
+	writeFile(t, dir, "imports.tf", i0)
+
+	if _, err := ApplyChanges(dir, []Change{{Address: "kubernetes_config_map_v1.shop_b", Resource: b, Import: ib}}); err != nil {
+		t.Fatal(err)
+	}
+	wantM, wantI := full(map[string][]byte{"kubernetes_service_v1.shop_a": a, "kubernetes_config_map_v1.shop_b": b},
+		map[string][]byte{"kubernetes_service_v1.shop_a": ia, "kubernetes_config_map_v1.shop_b": ib})
+	if got := readFile(t, dir, "main.tf"); got != wantM {
+		t.Errorf("main.tf after add differs from a full capture:\n%s\nwant:\n%s", got, wantM)
+	}
+	if got := readFile(t, dir, "imports.tf"); got != wantI {
+		t.Errorf("imports.tf after add differs:\n%s", got)
+	}
+	before, err := ApplyChanges(dir, []Change{{Address: "kubernetes_service_v1.shop_a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(before["kubernetes_service_v1.shop_a"], "x = 1") {
+		t.Errorf("previous block not returned: %q", before)
+	}
+	if strings.Contains(readFile(t, dir, "main.tf"), "shop_a") || strings.Contains(readFile(t, dir, "imports.tf"), "shop_a") {
+		t.Error("removed resource still present")
+	}
+}
+
+func writeFile(t *testing.T, dir, name, s string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(s), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readFile(t *testing.T, dir, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

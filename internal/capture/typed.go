@@ -9,6 +9,8 @@ import (
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
+
+	"scriven/internal/k8s"
 )
 
 // typedResources maps "group/Kind" to the hashicorp/kubernetes resource type
@@ -123,7 +125,8 @@ func importBlocks(objs []Discovered, defaultContext string) planned {
 	c.SetAttributeTraversal("type", hcl.Traversal{hcl.TraverseRoot{Name: "string"}})
 	c.SetAttributeValue("default", cty.StringVal(defaultContext))
 
-	return planned{Imports: hclwrite.Format(f.Bytes()), Provider: hclwrite.Format(p.Bytes()),
+	imps, _ := SplitBlocks(f.Bytes(), "import")
+	return planned{Imports: joinBlocks(imps, ""), Provider: hclwrite.Format(p.Bytes()),
 		Variables: hclwrite.Format(v.Bytes()), Count: len(objs), ByAddress: byAddr}
 }
 
@@ -150,4 +153,10 @@ func comment(s string) hclwrite.Tokens {
 		toks = append(toks, &hclwrite.Token{Type: hclsyntax.TokenComment, Bytes: []byte("# " + line + "\n")})
 	}
 	return toks
+}
+
+// Typed reports whether a kind has a typed Terraform resource scriven can capture.
+func Typed(r k8s.Resource) bool {
+	_, ok := typedResources[r.GVR.Group+"/"+r.Kind]
+	return ok
 }

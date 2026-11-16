@@ -21,6 +21,7 @@ type Repo struct {
 	cfg   config.Library
 	token string
 	dir   string
+	force bool // observed branch was reset to main: next push must be forced
 }
 
 func defaultUser(provider string) string {
