@@ -1,0 +1,49 @@
+# Read-only identity for scriven: get/list/watch on everything EXCEPT Secret contents.
+# Kubernetes RBAC has no deny rules, so Secrets are simply never granted.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: scriven
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scriven-readonly
+  namespace: scriven
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: scriven-readonly
+rules:
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - configmaps
+      - services
+      - serviceaccounts
+      - persistentvolumeclaims
+      - persistentvolumes
+      - limitranges
+      - resourcequotas
+      - nodes
+    verbs: [get, list, watch]
+  - apiGroups: [apps, batch, autoscaling, policy]
+    resources: ["*"]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io, rbac.authorization.k8s.io, storage.k8s.io, apiextensions.k8s.io]
+    resources: ["*"]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: scriven-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: scriven-readonly
+subjects:
+  - kind: ServiceAccount
+    name: scriven-readonly
+    namespace: scriven

@@ -1,0 +1,109 @@
+# scriven test lab — local stand-ins for everything the capture tool talks to.
+# Kubernetes clusters are created separately by ./lab-up.sh (k3d) on the same network.
+#
+#   cp .env.example .env      # set passwords / tokens
+#   ./lab-up.sh               # starts this stack + 2 k3d clusters + sample workloads
+#
+# Optional profiles:
+#   --profile aws   LocalStack (needs LOCALSTACK_AUTH_TOKEN since March 2026)
+#   --profile gcp   GCP Pub/Sub emulator, for testing the change-feed consumer
+
+name: scriven-lab
+
+networks:
+  lab:
+    name: scriven-lab        # k3d clusters join this network so Rancher can reach them
+
+volumes:
+  rancher-data:
+  gitea-data:
+
+services:
+  # --- Rancher on-prem stand-in (single container: dev/test only) -----------
+  rancher:
+    image: rancher/rancher:${RANCHER_TAG:-latest}
+    container_name: rancher
+    restart: unless-stopped
+    privileged: true
+    environment:
+      CATTLE_BOOTSTRAP_PASSWORD: ${RANCHER_BOOTSTRAP_PASSWORD:?set in .env}
+    ports:
+      - "8443:443"
+      - "8080:80"
+    volumes:
+      - rancher-data:/var/lib/rancher
+    networks: [lab]
+
+  # --- IaC library repo ------------------------------------------------------
+  gitea:
+    image: gitea/gitea:latest
+    container_name: gitea
+    restart: unless-stopped
+    environment:
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__server__ROOT_URL: http://localhost:3000/
+      GITEA__server__SSH_PORT: "2222"
+    ports:
+      - "3000:3000"
+      - "2222:22"
+    volumes:
+      - gitea-data:/data
+    networks: [lab]
+
+  # --- Secrets (dev mode: in-memory, unsealed, NOT for real secrets) --------
+  vault:
+    image: hashicorp/vault:latest
+    container_name: vault
+    restart: unless-stopped
+    cap_add: [IPC_LOCK]
+    command: server -dev -dev-listen-address=0.0.0.0:8200
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_TOKEN:-root}
+    ports:
+      - "8200:8200"
+    networks: [lab]
+
+  # --- Notifications ---------------------------------------------------------
+  mailpit:                     # email: SMTP on 1025, web inbox on 8025
+    image: axllent/mailpit:latest
+    container_name: mailpit
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+    networks: [lab]
+
+  webhook-catcher:             # stands in for Slack / Teams; logs every POST
+    image: mendhak/http-https-echo:latest
+    container_name: webhook-catcher
+    restart: unless-stopped
+    environment:
+      HTTP_PORT: "8080"
+    ports:
+      - "8081:8080"
+    networks: [lab]
+
+  # --- Optional: AWS emulator --------------------------------------------------
+  # LocalStack needs a (free, non-commercial) auth token since March 2026.
+  # Free alternatives exist (e.g. Floci, fakecloud) and also listen on 4566.
+  localstack:
+    profiles: [aws]
+    image: localstack/localstack:latest
+    container_name: localstack
+    restart: unless-stopped
+    environment:
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:-}
+    ports:
+      - "4566:4566"
+    networks: [lab]
+
+  # --- Optional: GCP Pub/Sub emulator (tests the Asset Inventory feed consumer)
+  pubsub:
+    profiles: [gcp]
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    container_name: pubsub
+    restart: unless-stopped
+    command: gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 --project=scriven-lab
+    ports:
+      - "8085:8085"
+    networks: [lab]
