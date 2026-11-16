@@ -1,0 +1,17 @@
+# Lab secrets and generated kubeconfigs
+scriven-lab/.env
+scriven-lab/.lab/
+
+# Build output
+/bin/
+/dist/
+*.exe
+
+# Terraform working files (captures are verified in a temp dir, never here)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# Local Scriven config used against the lab
+/scriven.yaml
