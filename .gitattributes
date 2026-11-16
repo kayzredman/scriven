@@ -1,0 +1,3 @@
+# Keep LF everywhere: shell scripts break with CRLF, and Go/HCL/YAML do not need it.
+* text=auto eol=lf
+*.exe binary
