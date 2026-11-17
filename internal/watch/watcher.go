@@ -35,6 +35,7 @@ type Watcher struct {
 	notify  *notify.Notifier
 	audit   *AuditStore
 	forge   library.Forge
+	metrics *Metrics
 
 	libMu sync.Mutex // one library update at a time, across all targets
 }
@@ -49,7 +50,8 @@ func New(c *config.Config, log io.Writer) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Watcher{cfg: c, log: log, token: token, resolve: res.Resolve, notify: notify.New(c.Notify, res), forge: f}, nil
+	return &Watcher{cfg: c, log: log, token: token, resolve: res.Resolve, notify: notify.New(c.Notify, res), forge: f,
+		metrics: NewMetrics()}, nil
 }
 
 func (w *Watcher) logf(format string, a ...any) {
@@ -61,6 +63,7 @@ func (w *Watcher) logf(format string, a ...any) {
 func (w *Watcher) Run(ctx context.Context, sweepOnStart bool) error {
 	if addr := w.cfg.Watch.AuditListen; addr != "" {
 		w.audit = NewAuditStore()
+		w.audit.seen = func() { w.metrics.Add("scriven_audit_events_total", 1) }
 		srv := &http.Server{Addr: addr, Handler: w.mux(), ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			w.logf("audit webhook listening on %s (POST /audit/<target-id>)", addr)
@@ -97,12 +100,17 @@ func (w *Watcher) Run(ctx context.Context, sweepOnStart bool) error {
 		tw, err := w.newTargetWatch(ctx, t)
 		if err != nil {
 			w.logf("%s: not watched: %v", t.Key(), err)
+			w.metrics.Set("scriven_target_watched", 0, "target", t.Key())
 			continue
 		}
 		started++
+		w.metrics.Set("scriven_target_watched", 1, "target", t.Key())
 		wg.Add(1)
 		go func() { defer wg.Done(); tw.run(ctx) }()
 	}
+	w.metrics.Set("scriven_up", 1)
+	w.metrics.Set("scriven_targets", float64(started), "mode", "live")
+	w.metrics.Set("scriven_targets", float64(sweepOnly), "mode", "sweep")
 	at := w.cfg.Watch.SweepAt
 	if started == 0 && (sweepOnly == 0 || at == "") {
 		return fmt.Errorf("no target could be watched (sweep-only targets need watch.sweep_at, or run `scriven sweep` from a scheduler)")
@@ -146,9 +154,11 @@ func (w *Watcher) newTargetWatch(ctx context.Context, t config.Target) (*targetW
 		return nil, err
 	}
 	s.Quiet()
-	return &targetWatch{w: w, s: s, debounce: w.cfg.Watch.DebounceDuration(),
+	tw := &targetWatch{w: w, s: s, debounce: w.cfg.Watch.DebounceDuration(),
 		hashes: map[string]string{}, pending: map[string]event{}, timers: map[string]*time.Timer{},
-		ready: make(chan string, 1024)}, nil
+		ready: make(chan string, 1024)}
+	s.Autoscaled = func(d capture.Discovered) bool { return tw.autoscaled(d.Res, &d.Obj) }
+	return tw, nil
 }
 
 func objKey(r k8s.Resource, o *unstructured.Unstructured) string {
@@ -329,6 +339,7 @@ func (tw *targetWatch) process(ctx context.Context, keys []string) {
 	}
 	if err := tw.record(ctx, evs); err != nil {
 		tw.w.logf("%s: could not record changes: %v", t.Key(), err)
+		tw.w.metrics.Add("scriven_record_errors_total", 1, "target", t.Key())
 		_ = tw.w.notify.Send(ctx, notify.Message{
 			Title: "Scriven could not record a change on " + t.Key(),
 			Text:  "A change was seen but not written to the library. The next sweep will retry.",
@@ -384,6 +395,9 @@ func (tw *targetWatch) record(ctx context.Context, evs []event) error {
 		if err != nil {
 			return err
 		}
+		if err := capture.RefreshCatalog(repo.Path(dir), ev.at); err != nil {
+			return err
+		}
 		o := outcome{ev: ev, addr: addr, diff: blockDiff(before[addr], string(ch.Resource))}
 		o.who, o.via, o.expected = tw.attribute(ev)
 		verb := map[string]string{"added": "add", "changed": "update", "removed": "remove"}[ev.op]
@@ -408,6 +422,7 @@ func (tw *targetWatch) record(ctx context.Context, evs []event) error {
 	pr := w.ensurePR(ctx)
 	for _, o := range done {
 		w.logf("%s: recorded %s (%s) by %s", t.Key(), o.addr, label(o.expected), o.who)
+		w.metrics.Add("scriven_changes_recorded_total", 1, "target", t.Key(), "label", map[bool]string{true: "expected", false: "drift"}[o.expected])
 		w.sendChange(ctx, t, o, pr)
 	}
 	return nil
@@ -525,6 +540,7 @@ func (w *Watcher) sendChange(ctx context.Context, t config.Target, o outcome, pr
 	})
 	if err != nil {
 		w.logf("notification failed: %v", err)
+		w.metrics.Add("scriven_notifications_failed_total", 1)
 	}
 }
 
@@ -532,6 +548,7 @@ func (w *Watcher) sendChange(ctx context.Context, t config.Target, o outcome, pr
 func (w *Watcher) mux() http.Handler {
 	m := http.NewServeMux()
 	m.Handle("/audit/", w.audit)
+	m.Handle("/metrics", w.metrics)
 	m.HandleFunc("/healthz", func(rw http.ResponseWriter, _ *http.Request) {
 		rw.WriteHeader(http.StatusOK)
 		_, _ = rw.Write([]byte("ok\n"))

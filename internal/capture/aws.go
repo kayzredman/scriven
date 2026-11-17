@@ -108,10 +108,7 @@ func runAWS(ctx context.Context, t config.Target, opt Options) (*Result, error) 
 		}
 	}
 	runner := &tf{dir: work, env: c.Env()}
-	if dir, err := pluginCache(); err == nil {
-		runner.env = append(runner.env, "TF_PLUGIN_CACHE_DIR="+dir)
-	}
-	if _, err := runner.run(ctx, "init", "-input=false", "-no-color"); err != nil {
+	if err := runner.initCached(ctx, awsProvider); err != nil {
 		return nil, err
 	}
 	providers := lockedProviders(work)

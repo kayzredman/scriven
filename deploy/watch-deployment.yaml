@@ -17,6 +17,11 @@ spec:
       labels:
         app.kubernetes.io/name: scriven
         app.kubernetes.io/component: watch
+      annotations:
+        # /metrics is served on the same port as the audit webhook.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8099"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: scriven
       automountServiceAccountToken: false

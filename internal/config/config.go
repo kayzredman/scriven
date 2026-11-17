@@ -36,6 +36,7 @@ type Watch struct {
 	// Address for the Kubernetes audit webhook (e.g. ":8099"). When set, the API
 	// server pushes audit events here and notifications name the user who made
 	// each change. Empty: notifications name the tool (field manager) only.
+	// The same address serves /healthz and Prometheus /metrics.
 	AuditListen string `yaml:"audit_listen,omitempty"`
 	// Daily full sweep time, local "HH:MM", to catch anything the watch missed.
 	// Empty disables the in-process sweep (run `scriven sweep` from cron instead).

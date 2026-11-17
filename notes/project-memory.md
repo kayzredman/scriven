@@ -39,10 +39,7 @@ The online Blueprint and Whiteboard still describe the tfk8s / manifest route fo
 - **Lab:** the k3d clusters are created with the audit policy and webhook config from a named Docker volume (`scriven-audit`). Bind mounts break on Windows paths with drive letters and spaces. Webhook target: `host.k3d.internal:8099`.
 - **Not done yet:**
   - Container image plus Deployment/CronJob manifests for running in-cluster.
-  - Prometheus metrics.
   - Per-environment notification routing.
-  - `catalog.yaml` isn't updated by watcher commits (sweeps refresh it).
-  - The capture's own cleanup still writes HPA-managed `replicas`, so a sweep can report replica drift on autoscaled workloads.
 
 ## In-cluster deployment (2026-11-17)
 
@@ -53,7 +50,7 @@ The online Blueprint and Whiteboard still describe the tfk8s / manifest route fo
 - **Namespace `scriven-system`** is excluded from capture, like `scriven`.
 - **Lab:** `lab-incluster.sh` deploys into `prod-sim` and watches both clusters. Pods can't resolve Docker container names, so the overlay pins them with `hostAliases`. `lab-audit-target.sh host|cluster` switches where the API servers send audit events. It restarts each k3d server and then its load balancer, because a restarted server can get a new IP and the load balancer keeps forwarding to the old one (which may now belong to the other cluster).
 - **Speed:** in-cluster on Linux, a change is recorded in about 6–10 seconds after the debounce. On the Windows host it took about 35 seconds.
-- **Not done yet:** image publishing to a registry or CI, Prometheus metrics, and an egress NetworkPolicy (addresses are site-specific).
+- **Not done yet:** image publishing to a registry or CI, and an egress NetworkPolicy (addresses are site-specific).
 
 ## Phase 2 build: AWS capture (2026-11-17)
 
@@ -75,6 +72,14 @@ The online Blueprint and Whiteboard still describe the tfk8s / manifest route fo
   - Live watching.
   - More resource types (EC2 instances, RDS, Lambda, load balancers, NAT gateways, KMS, and so on).
   - Assume-role settings in `scriven.yaml`.
-  - The container image only pre-fetches the Kubernetes provider, so AWS targets are untested in-cluster.
   - Generated code keeps every `false` default, so it is wordier than a person would write.
-  - A capture takes about 2 minutes on the Windows host. Not profiled yet.
+
+## Hardening sprint (2026-11-17)
+
+- **Slow captures were mostly a re-download.** Every capture starts in an empty directory with no lock file, and Terraform then ignores its plugin cache and downloads the provider again (800 MB for AWS). Fix: the first full lock file Terraform writes for a provider (one with `zh:` checksums for every platform) is saved beside the cache in `locks/`, and later captures start from it. `terraform init` went from about 2 minutes to 30 seconds, with the same lock file and `main.tf` as before. `TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE` was tried and rejected: it writes a lock with only this platform's checksum, which would break `terraform init` on any other OS.
+- **Provider pinning:** a saved lock pins that provider version on this machine. Delete `<user cache>/scriven/terraform-plugins/locks/<provider>.lock.hcl` to move to a newer provider.
+- **What is still slow on the Windows host:** each Terraform command starts the 800 MB AWS provider, and Windows Defender scans it (the first start took 67 seconds, later ones about 10). An AWS capture still takes about 3.5 minutes there. Not changed: a Defender exclusion is a decision for the machine's owner.
+- **Image:** pre-fetches `hashicorp/aws` as well as `hashicorp/kubernetes`, both served from the read-only filesystem mirror. `SCRIVEN_PLUGIN_CACHE=off` in the image stops scriven adding a plugin cache, which would copy the providers into `/tmp`.
+- **Autoscaled workloads:** a capture leaves out `spec.replicas` on a Deployment or StatefulSet that an HPA scales (the provider marks it optional and computed, so the plan stays at zero diff). A full capture works this out from the HPAs it discovers; the watcher uses its HPA informer. Gap: adding or removing an HPA does not re-capture its target until the next sweep.
+- **catalog.yaml on watcher commits:** each watcher commit updates `resource_count` and sets `observed_at`. The rest (uncaptured objects, provider versions) stays as the last full capture or sweep wrote it.
+- **Metrics:** `scriven watch` serves Prometheus text at `/metrics` on the `watch.audit_listen` address, written by hand (no client library). Counters: changes recorded by label, record errors, sweeps by result, audit events, failed notifications. Gauges: up, targets by mode, per-target watch state, last sweep duration and time, last successful sweep time, resources recorded by the last sweep. The sweep CronJob is a separate process and exports nothing.

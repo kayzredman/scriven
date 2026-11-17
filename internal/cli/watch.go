@@ -29,7 +29,8 @@ func watchCmd() *cobra.Command {
 			"verifies it with a zero-diff plan, commits it to the observed branch, keeps one PR open\n" +
 			"against main, and notifies with the diff and who made the change.\n\n" +
 			"With watch.audit_listen set, point each API server's audit webhook at\n" +
-			"http://<scriven-host><audit_listen>/audit/<target-id> to name users in notifications.",
+			"http://<scriven-host><audit_listen>/audit/<target-id> to name users in notifications.\n" +
+			"The same address serves /healthz and Prometheus metrics at /metrics.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := loadValid()
 			if err != nil {

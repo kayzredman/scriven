@@ -1,4 +1,4 @@
-# Inbound: only the audit webhook port. Outbound is left open because targets,
+# Inbound: only port 8099 (audit webhook, health check and /metrics). Outbound is left open because targets,
 # the library, Vault and notification endpoints live wherever you run them;
 # tighten egress in your overlay once those addresses are known.
 apiVersion: networking.k8s.io/v1

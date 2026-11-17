@@ -70,3 +70,51 @@ func TestLastManagerSkipsStatusAndUntimed(t *testing.T) {
 		t.Errorf("lastManager = %q", got)
 	}
 }
+
+func TestMetrics(t *testing.T) {
+	m := NewMetrics()
+	m.Add("scriven_changes_recorded_total", 1, "target", "rancher/prod", "label", "drift")
+	m.Add("scriven_changes_recorded_total", 1, "target", "rancher/prod", "label", "drift")
+	m.sweep("aws/shop", time.Now().Add(-90*time.Second), 3, nil)
+	m.sweep("aws/shop", time.Now(), 0, errBoom)
+	var nilM *Metrics
+	nilM.Add("scriven_up", 1) // must not panic
+
+	srv := httptest.NewServer(m)
+	defer srv.Close()
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var sb strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		n, err := resp.Body.Read(buf)
+		sb.Write(buf[:n])
+		if err != nil {
+			break
+		}
+	}
+	out := sb.String()
+	for _, want := range []string{
+		"# TYPE scriven_changes_recorded_total counter",
+		`scriven_changes_recorded_total{target="rancher/prod",label="drift"} 2`,
+		`scriven_sweeps_total{target="aws/shop",result="drift"} 1`,
+		`scriven_sweeps_total{target="aws/shop",result="error"} 1`,
+		`scriven_sweep_recorded_resources{target="aws/shop"} 3`, // the failed sweep keeps the last good value
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "e+") {
+		t.Errorf("values should be plain numbers:\n%s", out)
+	}
+}
+
+var errBoom = errorString("boom")
+
+type errorString string
+
+func (e errorString) Error() string { return string(e) }

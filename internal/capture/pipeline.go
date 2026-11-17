@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -15,13 +16,15 @@ import (
 	"scriven/internal/k8s"
 )
 
-const ToolVersion = "0.3.0"
+const ToolVersion = "0.4.0"
 
 const kubernetesProvider = "hashicorp/kubernetes"
 
 type Catalog struct {
-	Owner         string            `yaml:"owner,omitempty"`
-	CapturedAt    string            `yaml:"captured_at"`
+	Owner      string `yaml:"owner,omitempty"`
+	CapturedAt string `yaml:"captured_at"`
+	// When the watcher last changed this directory, after the full capture.
+	ObservedAt    string            `yaml:"observed_at,omitempty"`
 	Source        CatalogSource     `yaml:"source"`
 	Tool          string            `yaml:"tool"`
 	Terraform     string            `yaml:"terraform"`
@@ -85,7 +88,10 @@ type Session struct {
 	Client *k8s.Client
 	Who    string
 	Filter Filter
-	say    func(int, string)
+	// Autoscaled reports objects whose replica count an autoscaler owns. A full
+	// capture works it out from what it discovered; the watcher sets its own.
+	Autoscaled func(Discovered) bool
+	say        func(int, string)
 }
 
 // Open connects and refuses any identity that can write or read Secrets.
@@ -162,10 +168,7 @@ func (s *Session) CaptureObjects(ctx context.Context, objs []Discovered, keepWor
 	}
 	kc, _ := filepath.Abs(expand(s.Target.Kubeconfig))
 	runner := &tf{dir: work, env: []string{"TF_VAR_kubeconfig_path=" + filepath.ToSlash(kc)}}
-	if dir, err := pluginCache(); err == nil {
-		runner.env = append(runner.env, "TF_PLUGIN_CACHE_DIR="+dir)
-	}
-	if _, err := runner.run(ctx, "init", "-input=false", "-no-color"); err != nil {
+	if err := runner.initCached(ctx, kubernetesProvider); err != nil {
 		return nil, err
 	}
 	providers := lockedProviders(work)
@@ -190,7 +193,7 @@ func (s *Session) CaptureObjects(ctx context.Context, objs []Discovered, keepWor
 	}
 
 	// 4. Clean up
-	main, removed, fixed, err := cleanGenerated(raw, p.ByAddress)
+	main, removed, fixed, err := cleanGenerated(raw, p.ByAddress, s.Autoscaled)
 	if err != nil {
 		return nil, err
 	}
@@ -244,6 +247,7 @@ func Run(ctx context.Context, t config.Target, opt Options) (*Result, error) {
 	if len(d.Objects) == 0 {
 		return nil, fmt.Errorf("nothing to capture in %s", t.Key())
 	}
+	s.Autoscaled = AutoscaledBy(d.Objects)
 	cp, err := s.CaptureObjects(ctx, d.Objects, opt.KeepWorkdir)
 	if err != nil {
 		return nil, err
@@ -280,6 +284,11 @@ func Run(ctx context.Context, t config.Target, opt Options) (*Result, error) {
 // pluginCache shares downloaded providers between captures, so the watcher
 // does not fetch the provider again for every change.
 func pluginCache() (string, error) {
+	if os.Getenv("SCRIVEN_PLUGIN_CACHE") == "off" {
+		// The container image installs providers from a read-only mirror it
+		// carries. A cache would copy them (800 MB for AWS) into /tmp.
+		return "", fmt.Errorf("plugin cache turned off")
+	}
 	if dir := os.Getenv("TF_PLUGIN_CACHE_DIR"); dir != "" {
 		return dir, nil // e.g. the cache baked into the container image
 	}
@@ -289,6 +298,57 @@ func pluginCache() (string, error) {
 	}
 	dir := filepath.Join(base, "scriven", "terraform-plugins")
 	return dir, os.MkdirAll(dir, 0o755)
+}
+
+// cacheEnv points Terraform at the shared provider cache.
+func cacheEnv() []string {
+	dir, err := pluginCache()
+	if err != nil {
+		return nil
+	}
+	return []string{"TF_PLUGIN_CACHE_DIR=" + dir}
+}
+
+// A capture starts in an empty directory. With no lock file, Terraform does
+// not trust the plugin cache and downloads the provider again (800 MB for
+// AWS, about two minutes). So the first full lock file Terraform writes for a
+// provider is kept beside the cache, and later captures start from it: the
+// cache is then used, and the library's lock file still carries the checksums
+// for every platform. Delete the saved lock to move to a newer provider.
+func savedLock(provider string) string {
+	if os.Getenv("TF_PLUGIN_CACHE_DIR") != "" {
+		return "" // a cache baked into an image: nothing to save, and it may be read-only
+	}
+	dir, err := pluginCache()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "locks", strings.ReplaceAll(provider, "/", "_")+".lock.hcl")
+}
+
+func seedLock(work, provider string) {
+	if p := savedLock(provider); p != "" {
+		if b, err := os.ReadFile(p); err == nil {
+			_ = os.WriteFile(filepath.Join(work, ".terraform.lock.hcl"), b, 0o644)
+		}
+	}
+}
+
+func saveLock(work, provider string) {
+	p := savedLock(provider)
+	if p == "" {
+		return
+	}
+	if _, err := os.Stat(p); err == nil {
+		return
+	}
+	b, err := os.ReadFile(filepath.Join(work, ".terraform.lock.hcl"))
+	if err != nil || !strings.Contains(string(b), `"zh:`) {
+		return // only a lock with every platform's checksums is worth keeping
+	}
+	if os.MkdirAll(filepath.Dir(p), 0o755) == nil {
+		_ = os.WriteFile(p, b, 0o644)
+	}
 }
 
 func joinLines(s []string) string {
@@ -317,4 +377,15 @@ func providerOnlyNotes(p []string) []string {
 	}
 	out := []string{"Differences the plan showed that do not change the cluster:"}
 	return append(out, p...)
+}
+
+// initCached runs `terraform init` from the shared provider cache.
+func (t *tf) initCached(ctx context.Context, provider string) error {
+	t.env = append(t.env, cacheEnv()...)
+	seedLock(t.dir, provider)
+	if _, err := t.run(ctx, "init", "-input=false", "-no-color"); err != nil {
+		return err
+	}
+	saveLock(t.dir, provider)
+	return nil
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclwrite"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // Attributes whose zero value is meaningful and must stay even when 0/false/empty.
@@ -25,7 +26,7 @@ var emptyValues = map[string]bool{`0`: true, `""`: true, `null`: true, `[]`: tru
 // person would keep. It removes empty and zero attributes (several of which
 // the provider's own validation rejects), cluster-assigned values, and the
 // "__generated__" banners.
-func cleanGenerated(src []byte, byAddr map[string]Discovered) ([]byte, int, int, error) {
+func cleanGenerated(src []byte, byAddr map[string]Discovered, autoscaled func(Discovered) bool) ([]byte, int, int, error) {
 	f, diags := hclwrite.ParseConfig(src, "generated.tf", hcl.InitialPos)
 	if diags.HasErrors() {
 		return nil, 0, 0, fmt.Errorf("parsing generated config: %s", diags.Error())
@@ -41,6 +42,12 @@ func cleanGenerated(src []byte, byAddr map[string]Discovered) ([]byte, int, int,
 		removed += pruneEmpty(blk.Body(), keepZero)
 		if d, ok := byAddr[typ+"."+blk.Labels()[1]]; ok {
 			fixed += fixUnsetBooleans(blk, d)
+			// An autoscaler owns the replica count. Writing today's count would
+			// report drift every time it scales; replicas is optional and computed,
+			// so leaving it out keeps the plan at zero diff.
+			if autoscaled != nil && autoscaled(d) && removeAttrPath(blk.Body(), []string{"spec", "replicas"}) {
+				removed++
+			}
 		}
 		for _, path := range clusterAssigned[typ] {
 			if removeAttrPath(blk.Body(), strings.Split(path, ".")) {
@@ -90,4 +97,18 @@ func removeAttrPath(b *hclwrite.Body, path []string) bool {
 		}
 	}
 	return found
+}
+
+// AutoscaledBy reports which of objs an autoscaler among objs scales.
+func AutoscaledBy(objs []Discovered) func(Discovered) bool {
+	scaled := map[string]bool{}
+	for _, d := range objs {
+		if d.Res.Kind != "HorizontalPodAutoscaler" {
+			continue
+		}
+		kind, _, _ := unstructured.NestedString(d.Obj.Object, "spec", "scaleTargetRef", "kind")
+		name, _, _ := unstructured.NestedString(d.Obj.Object, "spec", "scaleTargetRef", "name")
+		scaled[kind+"/"+d.Obj.GetNamespace()+"/"+name] = true
+	}
+	return func(d Discovered) bool { return scaled[d.Res.Kind+"/"+d.Obj.GetNamespace()+"/"+d.Obj.GetName()] }
 }

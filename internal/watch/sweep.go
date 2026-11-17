@@ -18,50 +18,58 @@ import (
 // difference from the library on the observed branch. It catches what the
 // watch missed: changes made while scriven was down, or dropped events.
 func (w *Watcher) Sweep(ctx context.Context, t config.Target) error {
+	started := time.Now()
+	drift, err := w.sweep(ctx, t)
+	w.metrics.sweep(t.Key(), started, drift, err)
+	return err
+}
+
+// sweep does the work of Sweep and returns how many resources differ.
+func (w *Watcher) sweep(ctx context.Context, t config.Target) (int, error) {
 	w.logf("%s: sweep started", t.Key())
 	res, err := capture.Run(ctx, t, capture.Options{Filter: capture.FilterFor(w.cfg), Secrets: w.resolve})
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if !res.Plan.ZeroDiff() {
-		return fmt.Errorf("sweep capture failed verification: %s", strings.Join(res.Plan.Changes, "; "))
+		return 0, fmt.Errorf("sweep capture failed verification: %s", strings.Join(res.Plan.Changes, "; "))
 	}
 
 	w.libMu.Lock()
 	defer w.libMu.Unlock()
 	repo, err := library.OpenObserved(ctx, w.cfg.Library, w.token)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer repo.Close()
 	dir := res.Dir
 	if !repo.Exists(dir + "/main.tf") {
-		return fmt.Errorf("no baseline in the library at %s: run `scriven capture %s` and merge it first", dir, t.ID)
+		return 0, fmt.Errorf("no baseline in the library at %s: run `scriven capture %s` and merge it first", dir, t.ID)
 	}
 	oldMain, _ := os.ReadFile(repo.Path(dir + "/main.tf"))
 	if err := os.RemoveAll(repo.Path(dir)); err != nil {
-		return err
+		return 0, err
 	}
 	if err := os.MkdirAll(repo.Path(dir), 0o755); err != nil {
-		return err
+		return 0, err
 	}
 	for name, b := range res.Files {
 		if err := os.WriteFile(filepath.Join(repo.Path(dir), name), b, 0o644); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	msg := fmt.Sprintf("sweep %s: %d resources, zero diff\n\nFull re-capture by scriven's sweeper found differences from the library.",
 		t.Key(), res.Catalog.ResourceCount)
 	committed, err := repo.Commit(ctx, dir, msg)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if !committed {
 		w.logf("%s: sweep found the library up to date", t.Key())
-		return nil
+		return 0, nil
 	}
 	if err := repo.PushObserved(ctx); err != nil {
-		return err
+		return 0, err
 	}
 	pr := w.ensurePR(ctx)
 	added, changed, removed := compareBlocks(oldMain, res.Files["main.tf"])
@@ -80,8 +88,9 @@ func (w *Watcher) Sweep(ctx context.Context, t config.Target) error {
 		Link:  pr.URL,
 	}); err != nil {
 		w.logf("notification failed: %v", err)
+		w.metrics.Add("scriven_notifications_failed_total", 1)
 	}
-	return nil
+	return len(added) + len(changed) + len(removed), nil
 }
 
 func compareBlocks(oldMain, newMain []byte) (added, changed, removed []string) {

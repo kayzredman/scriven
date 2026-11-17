@@ -61,7 +61,7 @@ func deployment(spec map[string]any) Discovered {
 
 func TestCleanGenerated(t *testing.T) {
 	d := deployment(map[string]any{"enableServiceLinks": false}) // automount unset, service links explicitly off
-	out, removed, fixed, err := cleanGenerated([]byte(generated), map[string]Discovered{"kubernetes_deployment_v1.shop_web": d})
+	out, removed, fixed, err := cleanGenerated([]byte(generated), map[string]Discovered{"kubernetes_deployment_v1.shop_web": d}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

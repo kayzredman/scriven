@@ -56,6 +56,23 @@ scope:
       env: dev
       owner: platform-team
       kubeconfig: /etc/scriven/kubeconfigs/dev-sim.kubeconfig
+EOF
+# The AWS sample, when the Moto emulator is running (./lab-aws.sh).
+aws_lab=""
+if [[ "$(docker inspect -f '{{.State.Running}}' moto 2>/dev/null)" == "true" ]]; then
+  aws_lab=moto
+  cat >> "$out/scriven.yaml" <<'EOF'
+    - platform: aws
+      id: shop-lab
+      env: dev
+      owner: payments-team
+      region: eu-west-1
+      access_key_id: vault://scriven/aws-readonly#access_key_id
+      secret_access_key: vault://scriven/aws-readonly#secret_access_key
+      endpoint: http://moto:5000
+EOF
+fi
+cat >> "$out/scriven.yaml" <<'EOF'
 library:
   provider: gitea
   url: http://gitea:3000/scriven/iac-library.git
@@ -84,7 +101,7 @@ EOF
 # Pods can't resolve the lab's Docker container names, so pin them with hostAliases.
 ip() { docker inspect -f '{{(index .NetworkSettings.Networks "scriven-lab").IPAddress}}' "$1"; }
 aliases=""
-for n in gitea vault mailpit webhook-catcher k3d-prod-sim-serverlb k3d-dev-sim-serverlb; do
+for n in gitea vault mailpit webhook-catcher k3d-prod-sim-serverlb k3d-dev-sim-serverlb $aws_lab; do
   aliases+="          - ip: \"$(ip "$n")\"
             hostnames: [\"$n\"]
 "

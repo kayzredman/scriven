@@ -28,7 +28,7 @@ All lab acceptance checks pass.
 | `docs/` | Blueprint and whiteboard notes |
 | `notes/project-memory.md` | Decisions made so far |
 | `scriven-lab/` | Docker test lab and the scripts that seed it, run the replay check and deploy Scriven into it |
-| `Dockerfile` | Container image: the CLI, Terraform and the pinned Kubernetes provider, with no downloads at run time |
+| `Dockerfile` | Container image: the CLI, Terraform and the pinned Kubernetes and AWS providers, with no downloads at run time |
 | `deploy/` | Kustomize base for running in a cluster: watcher Deployment, sweep CronJob, audit webhook Service |
 
 ## Build
@@ -60,6 +60,7 @@ go test ./...
 - **Re-capture:** only the changed resources go through steps 2–5, including the zero-diff plan. Their blocks are then merged into the library's files in the same sorted layout a full capture writes, so a later sweep sees no phantom drift. Deletions just remove the block.
 - **Library:** commits go to `observed`, one per resource, each saying what changed and who changed it. One PR from `observed` to `main` stays open. Once it's merged, `observed` starts again from `main`.
 - **Who:** with `watch.audit_listen` set, each API server's audit webhook posts to `http://<scriven>/audit/<target-id>`. Notifications then name the user and the action (e.g. `alice via kubectl patch/scale`). This needs no access to nodes or log files. Without it, Scriven names the tool from `managedFields`. A change whose user agent is Terraform is labelled "expected" rather than "drift".
+- **Metrics:** the `watch.audit_listen` address also serves Prometheus metrics at `/metrics`: changes recorded (drift or expected), recording errors, sweeps by result with their duration and time, audit events received and failed notifications. Alert on `scriven_last_successful_sweep_timestamp_seconds` growing old. The sweep CronJob is a separate process and reports nothing here.
 
 Settings (`scriven config set watch.<key> <value>`): `debounce` (e.g. `10s`), `audit_listen` (e.g. `127.0.0.1:8099`), `sweep_at` (e.g. `02:00`), `exclude_kinds` (e.g. `"[ConfigMap]"`).
 
@@ -73,6 +74,7 @@ Settings (`scriven config set watch.<key> <value>`): `debounce` (e.g. `10s`), `a
 4. **Clean up:**
    - Sorts the blocks so output is stable.
    - Removes empty and zero values (some of these fail the provider's own validation) and values the cluster assigns, such as Service cluster IPs.
+   - Leaves out `replicas` on a Deployment or StatefulSet that an autoscaler scales, so scaling is not reported as drift.
    - Corrects a provider misread: see the [notes](notes/project-memory.md).
 5. **Verify:** `terraform plan` against the live cluster must show no changes. The only differences accepted are Terraform-only settings such as `wait_for_rollout`, and the known provider misread once it has been checked against the live object. Both are listed in `catalog.yaml`.
 6. **Commit:** writes `envs/<env>/<platform>/<id>/` to a branch `capture/<env>/<id>/<time>`, opens a PR, closes older open PRs for the same target, applies the merge policy and sends notifications. If nothing changed, nothing is committed.

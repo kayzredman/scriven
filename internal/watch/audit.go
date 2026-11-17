@@ -19,6 +19,7 @@ type AuditStore struct {
 	mu     sync.Mutex
 	events []AuditEvent
 	max    int
+	seen   func() // called for every write event kept, for metrics
 }
 
 type AuditEvent struct {
@@ -96,6 +97,9 @@ func (s *AuditStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.events = append(s.events, AuditEvent{Target: target, Time: ts, User: user, UserAgent: e.UserAgent,
 			Verb: e.Verb, Resource: ref.Resource, Sub: ref.Subresource, Namespace: ref.Namespace, Name: ref.Name})
+		if s.seen != nil {
+			s.seen()
+		}
 	}
 	if n := len(s.events); n > s.max {
 		s.events = append([]AuditEvent(nil), s.events[n-s.max:]...)
