@@ -83,3 +83,13 @@ The online Blueprint and Whiteboard still describe the tfk8s / manifest route fo
 - **Autoscaled workloads:** a capture leaves out `spec.replicas` on a Deployment or StatefulSet that an HPA scales (the provider marks it optional and computed, so the plan stays at zero diff). A full capture works this out from the HPAs it discovers; the watcher uses its HPA informer. Gap: adding or removing an HPA does not re-capture its target until the next sweep.
 - **catalog.yaml on watcher commits:** each watcher commit updates `resource_count` and sets `observed_at`. The rest (uncaptured objects, provider versions) stays as the last full capture or sweep wrote it.
 - **Metrics:** `scriven watch` serves Prometheus text at `/metrics` on the `watch.audit_listen` address, written by hand (no client library). Counters: changes recorded by label, record errors, sweeps by result, audit events, failed notifications. Gauges: up, targets by mode, per-target watch state, last sweep duration and time, last successful sweep time, resources recorded by the last sweep. The sweep CronJob is a separate process and exports nothing.
+
+## First run against real AWS (2026-11-17)
+
+- **Setup:** a sandbox account, provisioned by the user from the console with the CloudFormation template `scriven-lab/aws-real/shop-sample.yaml` (no AWS CLI). It holds the same sample resources as the Moto lab and a metadata-only `scriven-readonly` user that may also call `iam:SimulatePrincipalPolicy`. The access key goes into the lab Vault at `secret/scriven/aws-real`, typed by the user. Keys are never pasted into chat.
+- **Result:** IAM policy simulation proved the identity read-only (the full check, which Moto cannot do), and the capture passed the zero-diff plan. AWS was reachable from this machine with no proxy.
+- **Found on real AWS, fixed:**
+  - CloudFormation's `cf-templates-<random>-<region>` upload bucket was captured. It is now left out and listed.
+  - The account ID survived inside strings: policy resources (`arn:aws:s3:::bucket/*`), the SNS default policy, bucket names. Clean-up now writes a captured resource's ARN at the start of a string as `${aws_x.y.arn}`, the account as `data.aws_caller_identity.current.account_id` (`providers.tf` then declares the data source), and the region inside ARNs as `var.aws_region`. Moto never showed this: its replay account has the same fake ID.
+- **Open question:** resources a CloudFormation stack manages are captured like any others, so the library and CloudFormation would both claim them, as with Helm. Decide whether to skip them (the `aws:cloudformation:stack-name` tag identifies them).
+- **Not yet tested on real AWS:** replay into a second, empty account.

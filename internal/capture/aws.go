@@ -93,7 +93,7 @@ func runAWS(ctx context.Context, t config.Target, opt Options) (*Result, error) 
 	byAddr := awsAddresses(inv.Items)
 	files := map[string][]byte{
 		"imports.tf":   awsImports(byAddr),
-		"providers.tf": awsProviderTF(),
+		"providers.tf": awsProviderTF(false),
 		"variables.tf": awsVariablesTF(c.Region),
 		"versions.tf":  versionsTF(tfv, awsProvider, ""),
 	}
@@ -132,7 +132,7 @@ func runAWS(ctx context.Context, t config.Target, opt Options) (*Result, error) 
 	}
 
 	// 4. Clean up
-	main, st, err := cleanAWS(raw, byAddr)
+	main, st, err := cleanAWS(raw, byAddr, awsWhere{account: c.Account, region: c.Region})
 	if err != nil {
 		return nil, err
 	}
@@ -161,12 +161,14 @@ func runAWS(ctx context.Context, t config.Target, opt Options) (*Result, error) 
 	}
 	files["imports.tf"] = awsImports(byAddr)
 	files["main.tf"] = main
-	for _, n := range []string{"imports.tf", "main.tf"} {
+	files["providers.tf"] = awsProviderTF(strings.Contains(string(main), "data.aws_caller_identity.current"))
+	for _, n := range []string{"imports.tf", "main.tf", "providers.tf"} {
 		if err := write(n, files[n]); err != nil {
 			return nil, err
 		}
 	}
-	say(4, fmt.Sprintf("removed %d empty, zero or AWS-assigned values; replaced %d literal IDs with references", st.removed, st.linked))
+	say(4, fmt.Sprintf("removed %d empty, zero or AWS-assigned values; replaced %d literal IDs with references "+
+		"and %d account, region or ARN parts of strings with expressions", st.removed, st.linked, st.templated))
 
 	// 5. Verify
 	say(5, "terraform plan against the live account (read-only)")
@@ -252,10 +254,18 @@ func awsImports(byAddr map[string]awscloud.Item) []byte {
 
 // The library holds no credentials and no endpoint: whoever runs this code
 // supplies them the usual AWS way (environment, profile, role).
-func awsProviderTF() []byte {
+//
+// withAccount adds the caller-identity data source that main.tf uses where a
+// string held this account's ID (policies, ARNs, bucket names), so the code
+// works unchanged in another account.
+func awsProviderTF(withAccount bool) []byte {
 	f := hclwrite.NewEmptyFile()
 	p := f.Body().AppendNewBlock("provider", []string{"aws"}).Body()
 	p.SetAttributeTraversal("region", hcl.Traversal{hcl.TraverseRoot{Name: "var"}, hcl.TraverseAttr{Name: "aws_region"}})
+	if withAccount {
+		f.Body().AppendNewline()
+		f.Body().AppendNewBlock("data", []string{"aws_caller_identity", "current"})
+	}
 	return hclwrite.Format(f.Bytes())
 }
 

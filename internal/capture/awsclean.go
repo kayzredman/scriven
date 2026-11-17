@@ -2,6 +2,7 @@ package capture
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -41,11 +42,15 @@ func awsNote(_ string, df leafDiff) string {
 	return ""
 }
 
-type awsCleanStats struct{ removed, linked int }
+type awsCleanStats struct{ removed, linked, templated int }
+
+// awsWhere is the account and region a capture ran against. Clean-up writes
+// them as expressions inside strings, so the code is not tied to this account.
+type awsWhere struct{ account, region string }
 
 // cleanAWS is step 4 for AWS: drop empty, zero and AWS-assigned values, then
 // turn literal IDs of captured resources into references.
-func cleanAWS(src []byte, byAddr map[string]awscloud.Item) ([]byte, awsCleanStats, error) {
+func cleanAWS(src []byte, byAddr map[string]awscloud.Item, where awsWhere) ([]byte, awsCleanStats, error) {
 	var st awsCleanStats
 	f, diags := hclwrite.ParseConfig(src, "generated.tf", hcl.InitialPos)
 	if diags.HasErrors() {
@@ -72,7 +77,7 @@ func cleanAWS(src []byte, byAddr map[string]awscloud.Item) ([]byte, awsCleanStat
 		addrs = append(addrs, addr)
 	}
 	sort.Strings(addrs)
-	st.linked = linkReferences(addrs, blocks, byAddr)
+	st.linked, st.templated = linkReferences(addrs, blocks, byAddr, where)
 
 	out := hclwrite.NewEmptyFile()
 	for _, a := range addrs {
@@ -121,7 +126,7 @@ type refTarget struct {
 // uses it, with a reference such as aws_vpc.shop.id. The plan stays at zero
 // diff because the reference resolves to the same value, and the code can be
 // replayed into an account where AWS hands out different IDs.
-func linkReferences(addrs []string, blocks map[string]*hclwrite.Block, byAddr map[string]awscloud.Item) int {
+func linkReferences(addrs []string, blocks map[string]*hclwrite.Block, byAddr map[string]awscloud.Item, where awsWhere) (int, int) {
 	targets := map[string]refTarget{}
 	for _, addr := range addrs { // sorted: when two resources share a value, the first address wins
 		for _, r := range byAddr[addr].Refs {
@@ -147,7 +152,30 @@ func linkReferences(addrs []string, blocks map[string]*hclwrite.Block, byAddr ma
 		}
 		return false
 	}
-	n := 0
+	// ARNs of captured resources, longest first, for matching the start of a
+	// longer string such as "arn:aws:s3:::assets/*".
+	var arns []string
+	for v := range targets {
+		if strings.HasPrefix(v, "arn:") {
+			arns = append(arns, v)
+		}
+	}
+	sort.Slice(arns, func(i, j int) bool {
+		return len(arns[i]) > len(arns[j]) || len(arns[i]) == len(arns[j]) && arns[i] < arns[j]
+	})
+	// link records from -> t.addr, unless that is a self-reference or would
+	// close a loop: then the value stays a literal.
+	link := func(from string, t refTarget) bool {
+		if t.addr == from || reaches(t.addr, from, map[string]bool{}) {
+			return false
+		}
+		if edges[from] == nil {
+			edges[from] = map[string]bool{}
+		}
+		edges[from][t.addr] = true
+		return true
+	}
+	n, templated := 0, 0
 	for _, addr := range addrs {
 		var walk func(b *hclwrite.Body)
 		walk = func(b *hclwrite.Body) {
@@ -164,17 +192,19 @@ func linkReferences(addrs []string, blocks map[string]*hclwrite.Block, byAddr ma
 					if i+2 < len(toks) && toks[i].Type == hclsyntax.TokenOQuote &&
 						toks[i+1].Type == hclsyntax.TokenQuotedLit && toks[i+2].Type == hclsyntax.TokenCQuote {
 						t, ok := targets[string(toks[i+1].Bytes)]
-						allowed := ok && t.addr != addr && (len(t.only) == 0 || contains(t.only, name))
-						// A reference that would close a loop stays a literal.
-						if allowed && !reaches(t.addr, addr, map[string]bool{}) {
-							if edges[addr] == nil {
-								edges[addr] = map[string]bool{}
-							}
-							edges[addr][t.addr] = true
+						if ok && (len(t.only) == 0 || contains(t.only, name)) && link(addr, t) {
 							out = append(out, refTokens(t.addr, t.attr)...)
 							i += 2
 							changed = true
 							n++
+							continue
+						}
+					}
+					if toks[i].Type == hclsyntax.TokenQuotedLit {
+						if s, k := rewriteString(string(toks[i].Bytes), addr, arns, targets, link, where); k > 0 {
+							out = append(out, &hclwrite.Token{Type: hclsyntax.TokenQuotedLit, Bytes: []byte(s)})
+							templated += k
+							changed = true
 							continue
 						}
 					}
@@ -190,8 +220,64 @@ func linkReferences(addrs []string, blocks map[string]*hclwrite.Block, byAddr ma
 		}
 		walk(blocks[addr].Body())
 	}
-	return n
+	return n, templated
 }
+
+// accountExpr is how generated code names the account it runs in.
+const accountExpr = "${data.aws_caller_identity.current.account_id}"
+
+// rewriteString makes a string literal portable: a captured resource's ARN at
+// its start becomes "${aws_x.y.arn}", the region inside an ARN becomes
+// var.aws_region, and the account ID becomes the caller's account. The
+// literal is in HCL's escaped form; the "${" written here is read back as an
+// interpolation when the file is parsed again. It returns how many parts it
+// rewrote.
+func rewriteString(s, from string, arns []string, targets map[string]refTarget,
+	link func(string, refTarget) bool, where awsWhere) (string, int) {
+	k := 0
+	head := ""
+	for _, a := range arns {
+		if len(s) > len(a) && strings.HasPrefix(s, a) && strings.ContainsRune("/:", rune(s[len(a)])) {
+			if t := targets[a]; link(from, t) {
+				head = "${" + t.addr + "." + t.attr + "}"
+				s = s[len(a):]
+				k++
+			}
+			break
+		}
+	}
+	if where.region != "" {
+		re := regexp.MustCompile(`(arn:[a-z-]+:[a-zA-Z0-9-]+:)` + regexp.QuoteMeta(where.region) + `:`)
+		if m := re.FindAllStringIndex(s, -1); len(m) > 0 {
+			k += len(m)
+			s = re.ReplaceAllString(s, "${1}$${var.aws_region}:")
+		}
+	}
+	if len(where.account) == 12 {
+		var b strings.Builder
+		for i := 0; i < len(s); {
+			j := strings.Index(s[i:], where.account)
+			if j < 0 {
+				b.WriteString(s[i:])
+				break
+			}
+			j += i
+			end := j + len(where.account)
+			// Only a whole number, not part of a longer run of digits.
+			if (j > 0 && isDigit(s[j-1])) || (end < len(s) && isDigit(s[end])) {
+				b.WriteString(s[i:end])
+			} else {
+				b.WriteString(s[i:j] + accountExpr)
+				k++
+			}
+			i = end
+		}
+		s = b.String()
+	}
+	return head + s, k
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
 func refTokens(addr, attr string) hclwrite.Tokens {
 	typ, name, _ := strings.Cut(addr, ".")

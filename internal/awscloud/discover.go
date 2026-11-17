@@ -217,6 +217,11 @@ func (c *Client) buckets(ctx context.Context, inv *Inventory) error {
 	}
 	for _, b := range out.Buckets {
 		name := aws.ToString(b.Name)
+		if strings.HasPrefix(name, "cf-templates-") {
+			// The console creates it to hold templates uploaded to CloudFormation.
+			inv.skip("aws_s3_bucket", name, "CloudFormation's template upload bucket, created by AWS")
+			continue
+		}
 		loc, err := s.GetBucketLocation(ctx, &s3.GetBucketLocationInput{Bucket: b.Name})
 		if err != nil {
 			if denied(err) {

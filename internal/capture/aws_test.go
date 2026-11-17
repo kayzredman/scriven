@@ -96,7 +96,7 @@ func awsItems() map[string]awscloud.Item {
 }
 
 func TestCleanAWS(t *testing.T) {
-	out, st, err := cleanAWS([]byte(awsGenerated), awsItems())
+	out, st, err := cleanAWS([]byte(awsGenerated), awsItems(), awsWhere{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestCleanAWS(t *testing.T) {
 		t.Errorf("linked = %d, want 6", st.linked)
 	}
 	// Same input, same bytes: the library must not churn between captures.
-	again, _, _ := cleanAWS([]byte(awsGenerated), awsItems())
+	again, _, _ := cleanAWS([]byte(awsGenerated), awsItems(), awsWhere{})
 	if string(again) != got {
 		t.Error("cleanAWS is not deterministic")
 	}
@@ -167,5 +167,64 @@ func TestImportFailure(t *testing.T) {
 	}
 	if got := importFailure(out, "aws_vpc.shop", "vpc-1"); got != "something else" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestPortableStrings(t *testing.T) {
+	const acct = "111122223333"
+	src := `resource "aws_s3_bucket" "assets" {
+  bucket = "shop-assets-111122223333"
+}
+
+resource "aws_iam_policy" "read" {
+  name = "read"
+  policy = jsonencode({
+    Statement = [{
+      Resource = ["arn:aws:s3:::shop-assets-111122223333", "arn:aws:s3:::shop-assets-111122223333/*"]
+    }]
+  })
+}
+
+resource "aws_sns_topic" "alerts" {
+  name = "alerts"
+  policy = jsonencode({
+    Statement = [{
+      Condition = { StringEquals = { "AWS:SourceOwner" = "111122223333" } }
+      Resource  = "arn:aws:sns:eu-west-1:111122223333:alerts"
+      Note      = "ticket 91111222233330 eu-west-1"
+    }]
+  })
+}
+`
+	items := map[string]awscloud.Item{
+		"aws_s3_bucket.assets": {Type: "aws_s3_bucket", ID: "shop-assets-" + acct, Refs: []awscloud.Ref{
+			{Value: "shop-assets-" + acct, Attr: "id", Only: []string{"bucket"}},
+			{Value: "arn:aws:s3:::shop-assets-" + acct, Attr: "arn"}}},
+		"aws_iam_policy.read": {Type: "aws_iam_policy", ID: "arn:aws:iam::" + acct + ":policy/read"},
+		"aws_sns_topic.alerts": {Type: "aws_sns_topic", ID: "arn:aws:sns:eu-west-1:" + acct + ":alerts",
+			Refs: []awscloud.Ref{{Value: "arn:aws:sns:eu-west-1:" + acct + ":alerts", Attr: "arn"}}},
+	}
+	out, st, err := cleanAWS([]byte(src), items, awsWhere{account: acct, region: "eu-west-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	for _, want := range []string{
+		`bucket = "shop-assets-${data.aws_caller_identity.current.account_id}"`,
+		`aws_s3_bucket.assets.arn, "${aws_s3_bucket.assets.arn}/*"`, // the whole ARN, and the ARN at the start of a path
+		`"AWS:SourceOwner" = "${data.aws_caller_identity.current.account_id}"`,
+		// The topic's own ARN: no self-reference, so account and region become expressions.
+		`"arn:aws:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alerts"`,
+		`"ticket 91111222233330 eu-west-1"`, // longer numbers and region names outside ARNs stay
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("want %s in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `-`+acct) || strings.Contains(got, `:`+acct) {
+		t.Errorf("account ID left in:\n%s", got)
+	}
+	if st.templated == 0 {
+		t.Error("templated count not reported")
 	}
 }

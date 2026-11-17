@@ -5,7 +5,7 @@ Captures deployed infrastructure (Rancher on-prem, AWS, Azure, GCP) as Terraform
 **Status:**
 
 - **Rancher/Kubernetes:** done. The setup wizard, the one-shot capture, and the watcher with its sweeper all work, and Scriven also runs inside a cluster as a Deployment plus a nightly CronJob.
-- **AWS:** capture and sweep work for a first set of 14 resource types. This has only been tested against the Moto emulator in the lab, never against a real AWS account. Live watching is not built.
+- **AWS:** capture and sweep work for a first set of 14 resource types. Tested against the Moto emulator in the lab, and against one real AWS sandbox account, where the read-only check and the zero-diff capture passed. Live watching is not built.
 - **Azure and GCP:** not built.
 
 All lab acceptance checks pass.
@@ -83,12 +83,13 @@ Settings (`scriven config set watch.<key> <value>`): `debounce` (e.g. `10s`), `a
 
 One target is one account and region. The six steps are the same as for a cluster; what differs:
 
-1. **Discover:** logs in with the read-only identity (a profile, access keys given as secret references, or the default AWS credential chain) and **refuses to go on** if that identity can write. The check is IAM policy simulation of 26 write and secret-read actions. Where the identity may not simulate, Scriven falls back to EC2 dry-run requests, which is a weaker check, and says so in `catalog.yaml`. The default VPC, each VPC's main route table and default security group, and service-linked roles are left out and listed.
+1. **Discover:** logs in with the read-only identity (a profile, access keys given as secret references, or the default AWS credential chain) and **refuses to go on** if that identity can write. The check is IAM policy simulation of 26 write and secret-read actions. Where the identity may not simulate, Scriven falls back to EC2 dry-run requests, which is a weaker check, and says so in `catalog.yaml`. The default VPC, each VPC's main route table and default security group, service-linked roles, and CloudFormation's `cf-templates-` upload bucket are left out and listed.
 2. **Import blocks:** one per resource. Covered types: VPCs, subnets, internet gateways, route tables and their associations, security groups, S3 buckets and versioning, IAM roles with their inline and attached policies, customer-managed IAM policies, DynamoDB tables and SNS topics. Nothing else in the account is captured yet, and `catalog.yaml` says so.
 3. **Generate HCL:** as for a cluster. A resource Terraform cannot import is left out and listed, with the reason.
 4. **Clean up:**
    - Removes empty and zero values, `tags_all`, the per-resource `region`, and values AWS assigns.
    - **Replaces literal IDs with references**, such as `vpc_id = aws_vpc.shop.id`. The code then works in an account where AWS hands out different IDs. A reference that would create a cycle stays a literal.
+   - **Makes strings portable:** inside policies, ARNs and names, a captured resource's ARN at the start of a longer value becomes `"${aws_s3_bucket.assets.arn}/*"`, the account ID becomes `data.aws_caller_identity.current.account_id`, and the region inside an ARN becomes `var.aws_region`.
 5. **Verify:** `terraform plan` against the live account must show no changes.
 6. **Commit:** as for a cluster. The library holds no credentials and no endpoint.
 
@@ -148,6 +149,18 @@ AWS, against the lab's Moto emulator (no AWS account, CLI or token):
 ./lab-aws.sh --drift        # 3 manual changes
 ../bin/scriven sweep shop-lab   # expect 1 new, 1 changed, 1 removed on the `observed` PR
 ```
+
+AWS, in a real sandbox account (never a production one): `scriven-lab/aws-real/shop-sample.yaml` is a CloudFormation template with the same sample resources plus a read-only `scriven-readonly` user. Upload it in the console (CloudFormation > Create stack > Upload a template file), create an access key for `scriven-readonly`, store it in Vault, and add a target with no `endpoint`:
+
+```bash
+docker exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=root vault \
+  vault kv put secret/scriven/aws-real access_key_id=... secret_access_key=...
+# target: platform aws, region of the stack,
+#   access_key_id: vault://scriven/aws-real#access_key_id
+#   secret_access_key: vault://scriven/aws-real#secret_access_key
+```
+
+Deleting the stack removes everything it created.
 
 Needs Docker with Compose, k3d, kubectl and helm. Lab credentials go in `scriven-lab/.lab/`, which git ignores. Moto keeps everything in memory: after its container restarts, run `./lab-aws.sh` and capture again.
 

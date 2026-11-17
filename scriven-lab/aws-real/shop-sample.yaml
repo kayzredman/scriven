@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Scriven test: a small sample setup for scriven to capture (the same resources
+  as the Moto lab), plus a read-only IAM user for scriven. Nothing here has an
+  hourly charge. Delete the stack to remove all of it.
+
+# Deploy from the AWS console: CloudFormation > Create stack > Upload a template
+# file. Tick "I acknowledge that AWS CloudFormation might create IAM resources
+# with custom names" on the last page. Any region works.
+
+Resources:
+  # ---- network --------------------------------------------------------------
+  ShopVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: shop }
+        - { Key: team, Value: payments }
+
+  ShopSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ShopVpc
+      CidrBlock: 10.20.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - { Key: Name, Value: shop-a }
+
+  ShopSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ShopVpc
+      CidrBlock: 10.20.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: shop-b }
+
+  ShopGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: shop }
+
+  ShopGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ShopVpc
+      InternetGatewayId: !Ref ShopGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ShopVpc
+      Tags:
+        - { Key: Name, Value: shop-public }
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: ShopGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ShopGateway
+
+  PublicSubnetBAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref ShopSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: shop-web
+      GroupDescription: Web tier
+      VpcId: !Ref ShopVpc
+      SecurityGroupIngress:
+        - { Description: https, IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0 }
+      Tags:
+        - { Key: Name, Value: shop-web }
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: shop-db
+      GroupDescription: "Database tier: reachable from the web tier only"
+      VpcId: !Ref ShopVpc
+      SecurityGroupIngress:
+        - Description: postgres from web
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+      Tags:
+        - { Key: Name, Value: shop-db }
+
+  # ---- storage, identity, data, messaging -----------------------------------
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Bucket names are global across all of AWS: the account ID keeps this one unique.
+      BucketName: !Sub shop-assets-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: shop-app
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal: { Service: ec2.amazonaws.com }
+      Tags:
+        - { Key: team, Value: payments }
+
+  AssetsReadPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: shop-assets-read
+      Roles: [!Ref AppRole]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: [s3:GetObject, s3:ListBucket]
+            Resource:
+              - !GetAtt AssetsBucket.Arn
+              - !Sub "${AssetsBucket.Arn}/*"
+
+  OrdersTablePolicy:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !Ref AppRole
+      PolicyName: orders-table
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: [dynamodb:GetItem, dynamodb:PutItem]
+            Resource: !GetAtt OrdersTable.Arn
+
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: shop-orders
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: order_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: order_id, KeyType: HASH }
+      Tags:
+        - { Key: team, Value: payments }
+
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: shop-alerts
+
+  # ---- scriven's own identity -----------------------------------------------
+  # Can read the configuration of what scriven captures, and nothing else: no
+  # writes, no object contents, no table items, no secrets. It may also run
+  # IAM policy simulation, which is how scriven proves to itself that it
+  # cannot write. Create its access key in the console after the stack is up.
+  ScrivenReadOnlyUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: scriven-readonly
+      Policies:
+        - PolicyName: read-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Resource: "*"
+                Action:
+                  - sts:GetCallerIdentity
+                  - ec2:Describe*
+                  - s3:ListAllMyBuckets
+                  - s3:ListBucket
+                  - s3:GetBucket*
+                  - s3:Get*Configuration
+                  - s3:ListTagsForResource
+                  - iam:Get*
+                  - iam:List*
+                  - iam:SimulatePrincipalPolicy
+                  - dynamodb:Describe*
+                  - dynamodb:List*
+                  - sns:Get*
+                  - sns:List*
+
+Outputs:
+  Region:
+    Description: Region to give scriven
+    Value: !Ref AWS::Region
+  AccountId:
+    Description: Account the resources are in
+    Value: !Ref AWS::AccountId
+  AssetsBucket:
+    Value: !Ref AssetsBucket
+  ScrivenUser:
+    Description: Create an access key for this user (IAM > Users), for scriven
+    Value: !Ref ScrivenReadOnlyUser
