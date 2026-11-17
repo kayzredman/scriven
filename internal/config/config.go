@@ -66,6 +66,13 @@ type Target struct {
 	// Rancher / Kubernetes: kubeconfig for the read-only identity.
 	Kubeconfig string `yaml:"kubeconfig,omitempty"`
 	Context    string `yaml:"context,omitempty"`
+	// AWS: one target is one account and region. With no profile and no keys,
+	// the default AWS credential chain is used (environment, instance role).
+	Region          string `yaml:"region,omitempty"`
+	Profile         string `yaml:"profile,omitempty"`
+	AccessKeyID     string `yaml:"access_key_id,omitempty"`     // secret reference
+	SecretAccessKey string `yaml:"secret_access_key,omitempty"` // secret reference
+	Endpoint        string `yaml:"endpoint,omitempty"`          // emulators only (Moto, LocalStack)
 }
 
 // Key is how targets are referred to, e.g. "rancher/prod-sim".
@@ -209,6 +216,22 @@ func (c *Config) Validate() error {
 		}
 		if t.Platform == "rancher" && t.Kubeconfig == "" {
 			add("%s.kubeconfig: required for rancher targets", p)
+		}
+		if t.Platform == "aws" {
+			if t.Region == "" {
+				add("%s.region: required for aws targets", p)
+			}
+			if (t.AccessKeyID == "") != (t.SecretAccessKey == "") {
+				add("%s: set both access_key_id and secret_access_key, or neither", p)
+			}
+			for name, v := range map[string]string{"access_key_id": t.AccessKeyID, "secret_access_key": t.SecretAccessKey} {
+				if v != "" && !IsRef(v) {
+					add("%s.%s: must be a vault://, env:// or file:// reference, not a raw key", p, name)
+				}
+			}
+			if t.Profile != "" && t.AccessKeyID != "" {
+				add("%s: choose profile or access keys, not both", p)
+			}
 		}
 		if seen[t.Key()] {
 			add("%s: duplicate target %s", p, t.Key())

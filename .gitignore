@@ -16,3 +16,6 @@ scriven-lab/.lab/
 # Local Scriven config used against the lab
 /scriven.yaml
 scriven-lab/audit/.webhook-*
+
+# Lab sample Terraform lock files: the provider version floats with the lab
+scriven-lab/sample-aws/**/.terraform.lock.hcl

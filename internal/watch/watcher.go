@@ -28,12 +28,13 @@ import (
 // Watcher follows every Rancher target's watch API and records changes in
 // the library's observed branch.
 type Watcher struct {
-	cfg    *config.Config
-	log    io.Writer
-	token  string
-	notify *notify.Notifier
-	audit  *AuditStore
-	forge  library.Forge
+	cfg     *config.Config
+	log     io.Writer
+	token   string
+	resolve func(string) (string, error)
+	notify  *notify.Notifier
+	audit   *AuditStore
+	forge   library.Forge
 
 	libMu sync.Mutex // one library update at a time, across all targets
 }
@@ -48,7 +49,7 @@ func New(c *config.Config, log io.Writer) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Watcher{cfg: c, log: log, token: token, notify: notify.New(c.Notify, res), forge: f}, nil
+	return &Watcher{cfg: c, log: log, token: token, resolve: res.Resolve, notify: notify.New(c.Notify, res), forge: f}, nil
 }
 
 func (w *Watcher) logf(format string, a ...any) {
@@ -71,10 +72,21 @@ func (w *Watcher) Run(ctx context.Context, sweepOnStart bool) error {
 	}
 
 	var wg sync.WaitGroup
-	started := 0
+	started, sweepOnly := 0, 0
 	for _, t := range w.cfg.Scope.Targets {
 		if t.Platform != "rancher" {
-			w.logf("%s: watching %s is Phase 2, skipped", t.Key(), t.Platform)
+			if !capture.Supported(t.Platform) {
+				w.logf("%s: %s targets are not supported yet, skipped", t.Key(), t.Platform)
+				continue
+			}
+			// No change feed for this platform yet: drift is found by sweeps.
+			w.logf("%s: not watched live; covered by sweeps only", t.Key())
+			sweepOnly++
+			if sweepOnStart {
+				if err := w.Sweep(ctx, t); err != nil {
+					w.logf("%s: start-up sweep failed: %v", t.Key(), err)
+				}
+			}
 			continue
 		}
 		if sweepOnStart {
@@ -91,11 +103,15 @@ func (w *Watcher) Run(ctx context.Context, sweepOnStart bool) error {
 		wg.Add(1)
 		go func() { defer wg.Done(); tw.run(ctx) }()
 	}
-	if started == 0 {
-		return fmt.Errorf("no target could be watched")
+	at := w.cfg.Watch.SweepAt
+	if started == 0 && (sweepOnly == 0 || at == "") {
+		return fmt.Errorf("no target could be watched (sweep-only targets need watch.sweep_at, or run `scriven sweep` from a scheduler)")
 	}
-	if at := w.cfg.Watch.SweepAt; at != "" {
+	if at != "" {
 		go w.sweepDaily(ctx, at)
+	}
+	if started == 0 {
+		<-ctx.Done()
 	}
 	wg.Wait()
 	return ctx.Err()

@@ -12,6 +12,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"scriven/internal/capture"
 	"scriven/internal/config"
 	"scriven/internal/k8s"
 	"scriven/internal/library"
@@ -34,14 +35,18 @@ func Resolver(c *config.Config) *secrets.Resolver {
 }
 
 // Target: read-only login, list one resource, and prove the identity cannot write.
-func Target(ctx context.Context, t config.Target) Result {
+func Target(ctx context.Context, cfg *config.Config, t config.Target) Result {
 	r := Result{Step: "scope " + t.Key()}
-	if t.Platform != "rancher" {
-		r.Warnings = append(r.Warnings, t.Platform+" targets are accepted but not testable until Phase 2")
-		return r
-	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	switch t.Platform {
+	case "rancher":
+	case "aws":
+		return awsTarget(ctx, cfg, t, r)
+	default:
+		r.Warnings = append(r.Warnings, t.Platform+" targets are accepted but cannot be tested or captured yet")
+		return r
+	}
 	c, err := k8s.Connect(t.Kubeconfig, t.Context)
 	if err != nil {
 		r.Err = err
@@ -64,6 +69,37 @@ func Target(ctx context.Context, t config.Target) Result {
 	}
 	_ = ns
 	r.Detail = fmt.Sprintf("%s as %s: can read, cannot write or read Secrets", c.Server, who)
+	return r
+}
+
+// awsTarget: log in, list what a capture would take, and prove the identity cannot write.
+func awsTarget(ctx context.Context, cfg *config.Config, t config.Target, r Result) Result {
+	c, err := capture.ConnectAWS(ctx, t, Resolver(cfg).Resolve)
+	if err != nil {
+		r.Err = err
+		return r
+	}
+	bad, method, err := c.ReadOnlyViolations(ctx)
+	if err != nil {
+		r.Err = err
+		return r
+	}
+	if len(bad) > 0 {
+		r.Err = fmt.Errorf("identity %s is not read-only (scriven refuses to use it):\n      - %s", c.ARN, strings.Join(bad, "\n      - "))
+		return r
+	}
+	inv, err := c.Discover(ctx)
+	if err != nil {
+		r.Err = err
+		return r
+	}
+	if len(inv.Unreadable) > 0 {
+		r.Warnings = append(r.Warnings, "the identity may not list: "+strings.Join(inv.Unreadable, ", "))
+	}
+	if strings.HasPrefix(method, "EC2 dry-run") {
+		r.Warnings = append(r.Warnings, "read-only check used "+method+"; allow iam:SimulatePrincipalPolicy for the full check")
+	}
+	r.Detail = fmt.Sprintf("%s as %s: can read %d resources, cannot write", c.Where(), c.ARN, len(inv.Items))
 	return r
 }
 
@@ -175,7 +211,7 @@ func Merge(ctx context.Context, c *config.Config) Result {
 func All(ctx context.Context, c *config.Config) []Result {
 	var out []Result
 	for _, t := range c.Scope.Targets {
-		out = append(out, Target(ctx, t))
+		out = append(out, Target(ctx, c, t))
 	}
 	return append(out, Library(ctx, c), Notify(ctx, c), Merge(ctx, c))
 }

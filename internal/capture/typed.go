@@ -64,7 +64,12 @@ func addrName(d Discovered) string {
 		parts = append(parts, ns)
 	}
 	parts = append(parts, d.Obj.GetName())
-	s := strings.Trim(nonIdent.ReplaceAllString(strings.ToLower(strings.Join(parts, "_")), "_"), "_")
+	return identName(strings.Join(parts, "_"))
+}
+
+// identName turns any name into a valid Terraform resource name.
+func identName(name string) string {
+	s := strings.Trim(nonIdent.ReplaceAllString(strings.ToLower(name), "_"), "_")
 	if s == "" || (s[0] >= '0' && s[0] <= '9') {
 		s = "r_" + s
 	}
@@ -143,7 +148,7 @@ func versionsTF(tfVersion, provider, providerVersion string) []byte {
 	if providerVersion != "" {
 		attrs["version"] = cty.StringVal("= " + providerVersion)
 	}
-	rp.SetAttributeValue("kubernetes", cty.ObjectVal(attrs))
+	rp.SetAttributeValue(provider[strings.LastIndex(provider, "/")+1:], cty.ObjectVal(attrs))
 	return hclwrite.Format(f.Bytes())
 }
 

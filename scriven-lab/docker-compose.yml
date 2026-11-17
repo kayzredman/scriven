@@ -83,9 +83,21 @@ services:
       - "8081:8080"
     networks: [lab]
 
-  # --- Optional: AWS emulator --------------------------------------------------
-  # LocalStack needs a (free, non-commercial) auth token since March 2026.
-  # Free alternatives exist (e.g. Floci, fakecloud) and also listen on 4566.
+  # --- AWS stand-in -----------------------------------------------------------
+  # Moto: open source, no account or token. Everything is kept in memory, so
+  # it starts empty; ./lab-aws.sh seeds it and switches IAM enforcement on.
+  moto:
+    build: ./moto            # pinned release + one signature fix, see moto/Dockerfile
+    image: scriven-lab/moto:5.2.5
+    container_name: moto
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    networks: [lab]
+
+  # --- Optional: LocalStack, a fuller AWS emulator ----------------------------
+  # Needs an auth token (free tier is non-commercial) since March 2026.
+  # scriven's AWS capture is developed against Moto above, not this.
   localstack:
     profiles: [aws]
     image: localstack/localstack:latest

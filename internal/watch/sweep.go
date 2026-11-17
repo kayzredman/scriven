@@ -19,7 +19,7 @@ import (
 // watch missed: changes made while scriven was down, or dropped events.
 func (w *Watcher) Sweep(ctx context.Context, t config.Target) error {
 	w.logf("%s: sweep started", t.Key())
-	res, err := capture.Run(ctx, t, capture.Options{Filter: capture.FilterFor(w.cfg)})
+	res, err := capture.Run(ctx, t, capture.Options{Filter: capture.FilterFor(w.cfg), Secrets: w.resolve})
 	if err != nil {
 		return err
 	}
@@ -117,7 +117,7 @@ func (w *Watcher) sweepDaily(ctx context.Context, at string) {
 		case <-time.After(time.Until(next)):
 		}
 		for _, t := range w.cfg.Scope.Targets {
-			if t.Platform != "rancher" {
+			if !capture.Supported(t.Platform) {
 				continue
 			}
 			if err := w.Sweep(ctx, t); err != nil {

@@ -60,5 +60,6 @@ Lab is up.
   Vault     http://localhost:8200    (token from .env)
   Mailpit   http://localhost:8025
   Webhooks  docker logs -f webhook-catcher
+  Moto      http://localhost:5000    (AWS stand-in; ./lab-aws.sh seeds it)
 Next: ./lab-drift.sh to simulate a manual change for the watcher to catch.
 EOF

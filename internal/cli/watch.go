@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"scriven/internal/capture"
 	"scriven/internal/config"
 	"scriven/internal/watch"
 )
@@ -76,7 +77,7 @@ func sweepCmd() *cobra.Command {
 			}
 			var errs []error
 			for _, t := range targets {
-				if t.Platform != "rancher" {
+				if !capture.Supported(t.Platform) {
 					continue
 				}
 				if err := w.Sweep(cmd.Context(), t); err != nil {

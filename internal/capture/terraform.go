@@ -94,6 +94,20 @@ var providerOnlyAttrs = map[string]bool{
 
 func (p PlanResult) ZeroDiff() bool { return len(p.Changes) == 0 }
 
+// kubernetesNote explains a planned difference that does not change the
+// cluster, or returns "" when the difference is real.
+func kubernetesNote(byAddr map[string]Discovered) func(string, leafDiff) string {
+	return func(addr string, df leafDiff) string {
+		if providerOnlyAttrs[df.path[0]] {
+			return df.path[0] + " (Terraform-only setting)"
+		}
+		if d, ok := byAddr[addr]; ok && quirkDiff(d, df.path, df.before, df.after) {
+			return df.path[len(df.path)-1] + " (unset in cluster = true; provider reads false)"
+		}
+		return ""
+	}
+}
+
 // planZeroDiff plans the generated code against the live environment and
 // reports every resource Terraform would create, change or destroy.
 // Nothing is applied: planning only reads.
@@ -101,7 +115,7 @@ func (p PlanResult) ZeroDiff() bool { return len(p.Changes) == 0 }
 // An update is still a no-op for the cluster when every differing field is
 // either a Terraform-only setting or the known provider read quirk on a field
 // the live object leaves unset (see quirks.go). Both are recorded as notes.
-func (t *tf) planZeroDiff(ctx context.Context, byAddr map[string]Discovered) (*PlanResult, error) {
+func (t *tf) planZeroDiff(ctx context.Context, note func(addr string, df leafDiff) string) (*PlanResult, error) {
 	if _, err := t.run(ctx, "plan", "-input=false", "-lock=false", "-no-color", "-out=capture.tfplan"); err != nil {
 		return nil, err
 	}
@@ -136,14 +150,10 @@ func (t *tf) planZeroDiff(ctx context.Context, byAddr map[string]Discovered) (*P
 		}
 		if len(ch.Actions) == 1 && ch.Actions[0] == "update" {
 			var real, notes []string
-			d, haveLive := byAddr[rc.Address]
 			for _, df := range leafDiffs(nil, ch.Before, ch.After, ch.AfterUnknown) {
-				switch {
-				case providerOnlyAttrs[df.path[0]]:
-					notes = append(notes, df.path[0]+" (Terraform-only setting)")
-				case haveLive && quirkDiff(d, df.path, df.before, df.after):
-					notes = append(notes, df.path[len(df.path)-1]+" (unset in cluster = true; provider reads false)")
-				default:
+				if n := note(rc.Address, df); n != "" {
+					notes = append(notes, n)
+				} else {
 					real = append(real, strings.Join(df.path, "."))
 				}
 			}

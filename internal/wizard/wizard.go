@@ -190,7 +190,7 @@ func (w *Wizard) scope(ctx context.Context, c *config.Config) error {
 		if !keep {
 			continue
 		}
-		if t, err = w.target(ctx, t); err != nil {
+		if t, err = w.target(ctx, c, t); err != nil {
 			return err
 		}
 		targets = append(targets, t)
@@ -206,7 +206,7 @@ func (w *Wizard) scope(ctx context.Context, c *config.Config) error {
 			}
 		}
 		w.printf("  Target %d\n", len(targets)+1)
-		t, err := w.target(ctx, config.Target{Platform: "rancher"})
+		t, err := w.target(ctx, c, config.Target{Platform: "rancher"})
 		if err != nil {
 			return err
 		}
@@ -228,7 +228,7 @@ func (w *Wizard) scope(ctx context.Context, c *config.Config) error {
 }
 
 // target asks for one target's details and repeats until its live test passes.
-func (w *Wizard) target(ctx context.Context, t config.Target) (config.Target, error) {
+func (w *Wizard) target(ctx context.Context, c *config.Config, t config.Target) (config.Target, error) {
 	for {
 		var err error
 		if t.Platform, err = w.choice("Platform", config.Platforms, t.Platform); err != nil {
@@ -251,7 +251,37 @@ func (w *Wizard) target(ctx context.Context, t config.Target) (config.Target, er
 				return t, err
 			}
 		}
-		ok, err := w.report(checks.Target(ctx, t))
+		if t.Platform == "aws" {
+			if t.Region, err = w.required("Region (one target is one account and region)", t.Region); err != nil {
+				return t, err
+			}
+			if t.Profile, err = w.ask("AWS profile for the read-only identity, blank to give access keys or use the default chain", t.Profile); err != nil {
+				return t, err
+			}
+			if t.Profile != "" {
+				t.AccessKeyID, t.SecretAccessKey = "", ""
+			} else {
+				for {
+					if t.AccessKeyID, err = w.ask("Access key ID reference (vault://, env://, file://), blank for the default chain", t.AccessKeyID); err != nil {
+						return t, err
+					}
+					if t.AccessKeyID == "" || config.IsRef(t.AccessKeyID) {
+						break
+					}
+					w.printf("    give a vault://, env:// or file:// reference, not the key itself\n")
+					t.AccessKeyID = ""
+				}
+				if t.AccessKeyID == "" {
+					t.SecretAccessKey = ""
+				} else if t.SecretAccessKey, err = w.refPrompt("Secret access key reference", t.SecretAccessKey); err != nil {
+					return t, err
+				}
+			}
+			if t.Endpoint, err = w.ask("Endpoint URL, only for an emulator such as Moto; blank for real AWS", t.Endpoint); err != nil {
+				return t, err
+			}
+		}
+		ok, err := w.report(checks.Target(ctx, c, t))
 		if err != nil || ok {
 			return t, err
 		}

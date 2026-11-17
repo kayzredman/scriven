@@ -2,7 +2,13 @@
 
 Captures deployed infrastructure (Rancher on-prem, AWS, Azure, GCP) as Terraform, keeps it in a Git-backed IaC library, and watches read-only for drift.
 
-**Status:** Phases 1 and 3 are done for Rancher/Kubernetes: the setup wizard, the one-shot capture, and the watcher with its sweeper. Scriven also runs inside a cluster, as a Deployment plus a nightly CronJob. All five lab acceptance checks pass. AWS, Azure and GCP (Phase 2) are not built yet.
+**Status:**
+
+- **Rancher/Kubernetes:** done. The setup wizard, the one-shot capture, and the watcher with its sweeper all work, and Scriven also runs inside a cluster as a Deployment plus a nightly CronJob.
+- **AWS:** capture and sweep work for a first set of 14 resource types. This has only been tested against the Moto emulator in the lab, never against a real AWS account. Live watching is not built.
+- **Azure and GCP:** not built.
+
+All lab acceptance checks pass.
 
 ## What's here
 
@@ -13,6 +19,7 @@ Captures deployed infrastructure (Rancher on-prem, AWS, Azure, GCP) as Terraform
 | `internal/wizard/` | `scriven init` / `config edit`: the four-step setup wizard |
 | `internal/checks/` | The live test behind each wizard step (reused by `config validate`) |
 | `internal/k8s/` | Read-only Kubernetes access, including the "is this identity really read-only?" check |
+| `internal/awscloud/` | Read-only AWS access: who the identity is, the proof it cannot write, and the list of resources to capture |
 | `internal/capture/` | The six-step pipeline: discover, import blocks, generate HCL, clean up, verify, commit |
 | `internal/library/` | Git working copy, PRs and branch protection (Gitea tested; GitHub and GitLab written but untested) |
 | `internal/notify/` | Slack, Teams (Adaptive Card) and email |
@@ -70,6 +77,21 @@ Settings (`scriven config set watch.<key> <value>`): `debounce` (e.g. `10s`), `a
 5. **Verify:** `terraform plan` against the live cluster must show no changes. The only differences accepted are Terraform-only settings such as `wait_for_rollout`, and the known provider misread once it has been checked against the live object. Both are listed in `catalog.yaml`.
 6. **Commit:** writes `envs/<env>/<platform>/<id>/` to a branch `capture/<env>/<id>/<time>`, opens a PR, closes older open PRs for the same target, applies the merge policy and sends notifications. If nothing changed, nothing is committed.
 
+## How an AWS capture works
+
+One target is one account and region. The six steps are the same as for a cluster; what differs:
+
+1. **Discover:** logs in with the read-only identity (a profile, access keys given as secret references, or the default AWS credential chain) and **refuses to go on** if that identity can write. The check is IAM policy simulation of 26 write and secret-read actions. Where the identity may not simulate, Scriven falls back to EC2 dry-run requests, which is a weaker check, and says so in `catalog.yaml`. The default VPC, each VPC's main route table and default security group, and service-linked roles are left out and listed.
+2. **Import blocks:** one per resource. Covered types: VPCs, subnets, internet gateways, route tables and their associations, security groups, S3 buckets and versioning, IAM roles with their inline and attached policies, customer-managed IAM policies, DynamoDB tables and SNS topics. Nothing else in the account is captured yet, and `catalog.yaml` says so.
+3. **Generate HCL:** as for a cluster. A resource Terraform cannot import is left out and listed, with the reason.
+4. **Clean up:**
+   - Removes empty and zero values, `tags_all`, the per-resource `region`, and values AWS assigns.
+   - **Replaces literal IDs with references**, such as `vpc_id = aws_vpc.shop.id`. The code then works in an account where AWS hands out different IDs. A reference that would create a cycle stays a literal.
+5. **Verify:** `terraform plan` against the live account must show no changes.
+6. **Commit:** as for a cluster. The library holds no credentials and no endpoint.
+
+AWS targets are not watched live yet. `scriven sweep` finds their drift, without naming who made the change.
+
 ## Running in a cluster
 
 ```bash
@@ -100,7 +122,7 @@ What the base sets up:
 ```bash
 cd scriven-lab
 cp .env.example .env        # set the Rancher bootstrap password
-./lab-up.sh                 # add "aws" and/or "gcp" for the optional emulators
+./lab-up.sh                 # add "aws" (LocalStack, needs a token) or "gcp" for the optional emulators
 ./lab-seed.sh               # Gitea user/repo/branch protection, Vault secrets, read-only kubeconfigs
 export VAULT_TOKEN=root
 ../bin/scriven init         # lab-seed prints the answers to give
@@ -113,7 +135,19 @@ export VAULT_TOKEN=root
 ./lab-down.sh               # --wipe also removes data volumes
 ```
 
-Needs Docker with Compose, k3d, kubectl and helm. Lab credentials go in `scriven-lab/.lab/`, which git ignores.
+AWS, against the lab's Moto emulator (no AWS account, CLI or token):
+
+```bash
+./lab-aws.sh                # sample resources, a read-only and an admin identity, IAM enforcement on
+../bin/scriven config edit  # add the aws target; lab-aws prints the answers to give
+../bin/scriven capture shop-lab --out /tmp/shop
+./lab-aws-replay.sh /tmp/shop   # rebuild it in a second, empty emulator
+../bin/scriven capture shop-lab # the same, into the library as a PR; merge it
+./lab-aws.sh --drift        # 3 manual changes
+../bin/scriven sweep shop-lab   # expect 1 new, 1 changed, 1 removed on the `observed` PR
+```
+
+Needs Docker with Compose, k3d, kubectl and helm. Lab credentials go in `scriven-lab/.lab/`, which git ignores. Moto keeps everything in memory: after its container restarts, run `./lab-aws.sh` and capture again.
 
 ## Lab acceptance checks (Blueprint)
 
@@ -122,3 +156,11 @@ Needs Docker with Compose, k3d, kubectl and helm. Lab credentials go in `scriven
 - [x] Replay of that capture onto a fresh k3d cluster re-captures with no differences (`lab-replay.sh`)
 - [x] `lab-drift.sh` produces 3 notifications and an `observed` PR in Gitea, naming `system:admin` as the user who made each change
 - [x] The tool's service account is refused when it tries to read a Secret or write anything
+
+AWS, against Moto:
+
+- [x] Wizard accepts an AWS target and its live test passes
+- [x] Full capture of `shop-lab` (16 resources) passes the zero-diff check
+- [x] Replay of that capture into an empty emulator creates all 16 resources, and a new plan shows no changes (`lab-aws-replay.sh`)
+- [x] After `lab-aws.sh --drift`, a sweep records 1 new, 1 changed and 1 removed resource on the `observed` PR and notifies
+- [x] An identity that can write (`lab-admin`) is refused

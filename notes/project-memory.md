@@ -1,6 +1,6 @@
 # Scriven: project memory
 
-What has been decided about this project so far. Started on 2026-11-16 and last updated the same day.
+What has been decided about this project so far. Started on 2026-11-16, last updated 2026-11-17.
 
 ## Decisions
 
@@ -54,3 +54,27 @@ The online Blueprint and Whiteboard still describe the tfk8s / manifest route fo
 - **Lab:** `lab-incluster.sh` deploys into `prod-sim` and watches both clusters. Pods can't resolve Docker container names, so the overlay pins them with `hostAliases`. `lab-audit-target.sh host|cluster` switches where the API servers send audit events. It restarts each k3d server and then its load balancer, because a restarted server can get a new IP and the load balancer keeps forwarding to the old one (which may now belong to the other cluster).
 - **Speed:** in-cluster on Linux, a change is recorded in about 6–10 seconds after the debounce. On the Windows host it took about 35 seconds.
 - **Not done yet:** image publishing to a registry or CI, Prometheus metrics, and an egress NetworkPolicy (addresses are site-specific).
+
+## Phase 2 build: AWS capture (2026-11-17)
+
+- **No AWS sign-up:** the user did not want an AWS or LocalStack account. AWS is developed against **Moto** (open source, no token) in the lab. Nothing here has run against a real AWS account, so treat real-AWS behaviour as unproven.
+- **Target shape:** one target is one account and region. Settings: `region`, then either `profile`, or `access_key_id` + `secret_access_key` as secret references, or neither (default credential chain). `endpoint` is for emulators only.
+- **Same engine as Kubernetes:** AWS SDK lists resources, then import blocks and `terraform plan -generate-config-out`, clean-up, and the zero-diff plan. Version 0.3.0.
+- **Covered types (14):** VPC, subnet, internet gateway, route table and association, security group, S3 bucket and versioning, IAM role, inline role policy, customer-managed policy, role-policy attachment, DynamoDB table, SNS topic. Everything else is uncaptured and `catalog.yaml` says so.
+- **Left out on purpose:** the default VPC, each VPC's main route table and default security group, and service-linked roles. AWS creates them and Terraform can only adopt them. Risk: routes someone added to a main route table are not captured.
+- **References instead of IDs:** clean-up replaces a captured resource's ID, where another resource uses it, with a reference (`aws_vpc.shop.id`). Opaque IDs and ARNs are replaced anywhere. Names (role name, bucket name) are replaced only in the attribute that means them (`role`, `bucket`). A reference that would close a cycle stays a literal. This is what makes replay into another account work.
+- **Read-only check:** first choice is `iam:SimulatePrincipalPolicy` over 26 write and secret-read actions. If that call is not available, the fallback is EC2 dry-run requests, recorded in `catalog.yaml` as the weaker check. The dry-run probes only ever "delete" IDs that do not exist: Moto ignores `DryRun` on some calls, and an earlier probe (`CreateVpc`) really created a VPC in the emulator.
+- **Open question:** `s3:GetObject` is not on the refuse list, because AWS's own `ReadOnlyAccess` policy grants it. Decide whether Scriven should insist on a metadata-only identity (`ViewOnlyAccess` style).
+- **SQS dropped for now:** the provider cannot import a queue whose URL is not an `amazonaws.com` URL, so it cannot be tested on an emulator.
+- **Emulator plumbing, kept out of the library:** with `endpoint` set, the scratch directory gets an override file (`s3_use_path_style`), and Terraform runs with `HTTP_PROXY` pointing at the emulator. The provider calls S3 Control at `<account-id>.<host>`, which does not resolve locally; sent through the emulator as a proxy, the request arrives.
+- **Lab Moto is patched:** `scriven-lab/moto/Dockerfile` pins 5.2.5 and makes S3 Control use Moto's S3 signer. Without it, with IAM enforcement on, reading bucket tags fails for every identity and no bucket can be imported.
+- **IAM is global:** an account with targets in several regions would capture its roles and policies in each. Not handled yet.
+- **Sweep only:** AWS targets are not watched live. `scriven watch` logs that and sweeps them (`--sweep-first`, `watch.sweep_at`). Drift notifications cannot name who made the change. CloudTrail or EventBridge is the likely feed.
+- **Not done yet:**
+  - A run against a real AWS account.
+  - Live watching.
+  - More resource types (EC2 instances, RDS, Lambda, load balancers, NAT gateways, KMS, and so on).
+  - Assume-role settings in `scriven.yaml`.
+  - The container image only pre-fetches the Kubernetes provider, so AWS targets are untested in-cluster.
+  - Generated code keeps every `false` default, so it is wordier than a person would write.
+  - A capture takes about 2 minutes on the Windows host. Not profiled yet.

@@ -143,7 +143,7 @@ func relevantChecks(ctx context.Context, c *config.Config, key string) []checks.
 	case hasPrefix(key, "scope"):
 		var out []checks.Result
 		for _, t := range c.Scope.Targets {
-			out = append(out, checks.Target(ctx, t))
+			out = append(out, checks.Target(ctx, c, t))
 		}
 		return out
 	case hasPrefix(key, "library"), hasPrefix(key, "vault"):

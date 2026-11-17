@@ -90,3 +90,31 @@ func TestSetKeepsCommentsAndParsesYAML(t *testing.T) {
 		t.Fatal("unknown key should fail")
 	}
 }
+
+func TestValidateAWSTarget(t *testing.T) {
+	base := func() *Config {
+		c, err := Load(write(t, sample))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	ok := base()
+	ok.Scope.Targets = append(ok.Scope.Targets, Target{Platform: "aws", ID: "shop", Env: "dev", Region: "eu-west-1",
+		AccessKeyID: "vault://scriven/aws#access_key_id", SecretAccessKey: "vault://scriven/aws#secret_access_key"})
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid aws target rejected: %v", err)
+	}
+	for name, tgt := range map[string]Target{
+		"region: required":       {Platform: "aws", ID: "a", Env: "dev"},
+		"not a raw key":          {Platform: "aws", ID: "a", Env: "dev", Region: "r", AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "env://S"},
+		"or neither":             {Platform: "aws", ID: "a", Env: "dev", Region: "r", AccessKeyID: "env://K"},
+		"profile or access keys": {Platform: "aws", ID: "a", Env: "dev", Region: "r", Profile: "p", AccessKeyID: "env://K", SecretAccessKey: "env://S"},
+	} {
+		c := base()
+		c.Scope.Targets = append(c.Scope.Targets, tgt)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("want an error mentioning %q, got %v", name, err)
+		}
+	}
+}

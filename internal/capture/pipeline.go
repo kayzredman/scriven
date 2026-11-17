@@ -15,7 +15,7 @@ import (
 	"scriven/internal/k8s"
 )
 
-const ToolVersion = "0.2.0"
+const ToolVersion = "0.3.0"
 
 const kubernetesProvider = "hashicorp/kubernetes"
 
@@ -38,6 +38,8 @@ type CatalogSource struct {
 	Env      string `yaml:"env"`
 	Server   string `yaml:"server"`
 	Identity string `yaml:"identity"`
+	// How the identity was shown to be read-only, when there is more than one way.
+	ReadOnlyCheck string `yaml:"read_only_check,omitempty"`
 }
 
 type Uncaptured struct {
@@ -59,11 +61,17 @@ type Options struct {
 	Filter      Filter
 	KeepWorkdir bool
 	Progress    func(step int, msg string)
+	// Secrets resolves vault://, env:// and file:// references in a target's
+	// settings (AWS access keys). Kubernetes targets do not need it.
+	Secrets func(ref string) (string, error)
 }
 
 func LibraryDir(t config.Target) string {
 	return filepath.ToSlash(filepath.Join("envs", t.Env, t.Platform, t.ID))
 }
+
+// Supported reports whether scriven can capture (and so sweep) a platform.
+func Supported(platform string) bool { return platform == "rancher" || platform == "aws" }
 
 // FilterFor builds the capture filter from the settings.
 func FilterFor(c *config.Config) Filter {
@@ -86,7 +94,7 @@ func Open(ctx context.Context, t config.Target, f Filter, progress func(int, str
 		progress = func(int, string) {}
 	}
 	if t.Platform != "rancher" {
-		return nil, fmt.Errorf("%s: only rancher targets are supported in this phase (aws, azure and gcp are Phase 2)", t.Key())
+		return nil, fmt.Errorf("%s: only rancher targets can be watched; %s targets are covered by `scriven sweep`", t.Key(), t.Platform)
 	}
 	progress(1, "connecting to "+t.Key())
 	c, err := k8s.Connect(t.Kubeconfig, t.Context)
@@ -197,7 +205,7 @@ func (s *Session) CaptureObjects(ctx context.Context, objs []Discovered, keepWor
 
 	// 5. Verify
 	say(5, "terraform plan against the live cluster (read-only)")
-	plan, err := runner.planZeroDiff(ctx, p.ByAddress)
+	plan, err := runner.planZeroDiff(ctx, kubernetesNote(p.ByAddress))
 	if err != nil {
 		return nil, err
 	}
@@ -215,6 +223,13 @@ func (s *Session) CaptureObjects(ctx context.Context, objs []Discovered, keepWor
 
 // Run is a full capture of one target: steps 1-5, plus catalog.yaml.
 func Run(ctx context.Context, t config.Target, opt Options) (*Result, error) {
+	switch t.Platform {
+	case "rancher":
+	case "aws":
+		return runAWS(ctx, t, opt)
+	default:
+		return nil, fmt.Errorf("%s: %s targets are not supported yet", t.Key(), t.Platform)
+	}
 	s, err := Open(ctx, t, opt.Filter, opt.Progress)
 	if err != nil {
 		return nil, err

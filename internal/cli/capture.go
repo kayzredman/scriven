@@ -59,7 +59,8 @@ func captureCmd() *cobra.Command {
 				}
 			}
 			res, err := capture.Run(cmd.Context(), t, capture.Options{
-				Filter: capture.FilterFor(c), KeepWorkdir: keep, Progress: progress})
+				Filter: capture.FilterFor(c), KeepWorkdir: keep, Progress: progress,
+				Secrets: checks.Resolver(c).Resolve})
 			if err != nil {
 				return err
 			}
@@ -80,7 +81,7 @@ func captureCmd() *cobra.Command {
 				fmt.Fprintf(out, "\n%s\n", lastLines(p.Rendered, 60))
 				return errors.New("capture failed verification")
 			}
-			fmt.Fprintf(out, "      ✓ zero diff: the generated code matches the live cluster\n")
+			fmt.Fprintf(out, "      ✓ zero diff: the generated code matches the live environment\n")
 
 			if outDir != "" {
 				if err := writeFiles(outDir, res.Files); err != nil {
@@ -110,7 +111,7 @@ func captureCmd() *cobra.Command {
 				return err
 			}
 			if !changed {
-				fmt.Fprintf(out, "      library already matches the live cluster: nothing to commit\n")
+				fmt.Fprintf(out, "      library already matches the live environment: nothing to commit\n")
 				return nil
 			}
 			stat := repo.DiffStat(cmd.Context())
@@ -153,7 +154,7 @@ func captureCmd() *cobra.Command {
 			}
 			if err := n.Send(cmd.Context(), notify.Message{
 				Title: "Capture ready for review: " + t.Key(),
-				Text:  fmt.Sprintf("Scriven captured %d resources and verified zero diff against the live cluster.", res.Catalog.ResourceCount),
+				Text:  fmt.Sprintf("Scriven captured %d resources and verified zero diff against the live environment.", res.Catalog.ResourceCount),
 				Facts: facts, Link: pr.URL, Detail: stat,
 			}); err != nil {
 				fmt.Fprintf(out, "      ! notification failed: %v\n", err)

@@ -38,7 +38,7 @@ func cleanGenerated(src []byte, byAddr map[string]Discovered) ([]byte, int, int,
 			continue
 		}
 		typ := blk.Labels()[0]
-		removed += pruneEmpty(blk.Body())
+		removed += pruneEmpty(blk.Body(), keepZero)
 		if d, ok := byAddr[typ+"."+blk.Labels()[1]]; ok {
 			fixed += fixUnsetBooleans(blk, d)
 		}
@@ -60,17 +60,17 @@ func cleanGenerated(src []byte, byAddr map[string]Discovered) ([]byte, int, int,
 	return joinBlocks(blocks, mainHeader), removed, fixed, nil
 }
 
-func pruneEmpty(b *hclwrite.Body) int {
+func pruneEmpty(b *hclwrite.Body, keep map[string]bool) int {
 	n := 0
 	for name, attr := range b.Attributes() {
 		v := strings.TrimSpace(string(attr.Expr().BuildTokens(nil).Bytes()))
-		if emptyValues[v] && !keepZero[name] {
+		if emptyValues[v] && !keep[name] {
 			b.RemoveAttribute(name)
 			n++
 		}
 	}
 	for _, child := range b.Blocks() {
-		n += pruneEmpty(child.Body())
+		n += pruneEmpty(child.Body(), keep)
 	}
 	return n
 }
