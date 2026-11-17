@@ -1,0 +1,6 @@
+# Only cmd/, internal/ and go.mod/go.sum go into the image build.
+*
+!cmd/
+!internal/
+!go.mod
+!go.sum

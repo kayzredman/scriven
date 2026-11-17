@@ -43,3 +43,14 @@ The online Blueprint and Whiteboard still describe the tfk8s / manifest route fo
   - Per-environment notification routing.
   - `catalog.yaml` isn't updated by watcher commits (sweeps refresh it).
   - The capture's own cleanup still writes HPA-managed `replicas`, so a sweep can report replica drift on autoscaled workloads.
+
+## In-cluster deployment (2026-11-17)
+
+- **Image (`Dockerfile`):** multi-stage. Terraform is checked against HashiCorp's SHA256SUMS, and the Kubernetes provider is pre-fetched. The provider is served from a **filesystem mirror** (`TF_CLI_CONFIG_FILE`), not a plugin cache: with no lock file, Terraform rewrites cache entries, which fails on a read-only root filesystem. Captures need no network access to the registry.
+- **Manifests (`deploy/`):** a Kustomize base. Watcher Deployment (1 replica, `Recreate`, `--sweep-first`), sweep CronJob (02:00 UTC), audit Service, NetworkPolicy (ingress on 8099 only), namespace at the `restricted` Pod Security level.
+- **No in-cluster API rights:** the pods' ServiceAccount has no token mounted. Even the cluster Scriven runs in is reached through a read-only kubeconfig, so the "refuse an identity that can write" check applies everywhere.
+- **Change detection ignores bookkeeping files:** `catalog.yaml` (timestamp) and `.terraform.lock.hcl` (provider hashes differ between Windows and Linux). Otherwise a Linux sweep after a Windows capture committed and notified with nothing actually changed.
+- **Namespace `scriven-system`** is excluded from capture, like `scriven`.
+- **Lab:** `lab-incluster.sh` deploys into `prod-sim` and watches both clusters. Pods can't resolve Docker container names, so the overlay pins them with `hostAliases`. `lab-audit-target.sh host|cluster` switches where the API servers send audit events. It restarts each k3d server and then its load balancer, because a restarted server can get a new IP and the load balancer keeps forwarding to the old one (which may now belong to the other cluster).
+- **Speed:** in-cluster on Linux, a change is recorded in about 6–10 seconds after the debounce. On the Windows host it took about 35 seconds.
+- **Not done yet:** image publishing to a registry or CI, Prometheus metrics, and an egress NetworkPolicy (addresses are site-specific).

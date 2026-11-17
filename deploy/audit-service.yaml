@@ -1,0 +1,17 @@
+# Where API servers send audit events (watch.audit_listen must be ":8099").
+# Each API server's audit webhook kubeconfig points at
+#   http://<this service, or a NodePort/ingress for remote clusters>/audit/<target-id>
+apiVersion: v1
+kind: Service
+metadata:
+  name: scriven-audit
+  labels:
+    app.kubernetes.io/component: watch
+spec:
+  selector:
+    app.kubernetes.io/name: scriven
+    app.kubernetes.io/component: watch
+  ports:
+    - name: audit
+      port: 8099
+      targetPort: audit

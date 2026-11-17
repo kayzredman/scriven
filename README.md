@@ -2,7 +2,7 @@
 
 Captures deployed infrastructure (Rancher on-prem, AWS, Azure, GCP) as Terraform, keeps it in a Git-backed IaC library, and watches read-only for drift.
 
-**Status:** Phases 1 and 3 are done for Rancher/Kubernetes: the setup wizard, the one-shot capture, and the watcher with its sweeper. All five lab acceptance checks pass. AWS, Azure and GCP (Phase 2) are not built yet.
+**Status:** Phases 1 and 3 are done for Rancher/Kubernetes: the setup wizard, the one-shot capture, and the watcher with its sweeper. Scriven also runs inside a cluster, as a Deployment plus a nightly CronJob. All five lab acceptance checks pass. AWS, Azure and GCP (Phase 2) are not built yet.
 
 ## What's here
 
@@ -20,7 +20,9 @@ Captures deployed infrastructure (Rancher on-prem, AWS, Azure, GCP) as Terraform
 | `internal/secrets/` | Resolves `vault://`, `env://` and `file://` references |
 | `docs/` | Blueprint and whiteboard notes |
 | `notes/project-memory.md` | Decisions made so far |
-| `scriven-lab/` | Docker test lab and the scripts that seed it and run the replay check |
+| `scriven-lab/` | Docker test lab and the scripts that seed it, run the replay check and deploy Scriven into it |
+| `Dockerfile` | Container image: the CLI, Terraform and the pinned Kubernetes provider, with no downloads at run time |
+| `deploy/` | Kustomize base for running in a cluster: watcher Deployment, sweep CronJob, audit webhook Service |
 
 ## Build
 
@@ -68,6 +70,31 @@ Settings (`scriven config set watch.<key> <value>`): `debounce` (e.g. `10s`), `a
 5. **Verify:** `terraform plan` against the live cluster must show no changes. The only differences accepted are Terraform-only settings such as `wait_for_rollout`, and the known provider misread once it has been checked against the live object. Both are listed in `catalog.yaml`.
 6. **Commit:** writes `envs/<env>/<platform>/<id>/` to a branch `capture/<env>/<id>/<time>`, opens a PR, closes older open PRs for the same target, applies the merge policy and sends notifications. If nothing changed, nothing is committed.
 
+## Running in a cluster
+
+```bash
+docker build -t <registry>/scriven:<tag> .
+kubectl apply -k <your-overlay>      # an overlay on top of deploy/
+```
+
+`deploy/` is a Kustomize base. Your overlay adds four things:
+
+| What | Holds |
+| --- | --- |
+| ConfigMap `scriven-config` | `scriven.yaml`, with kubeconfig paths under `/etc/scriven/kubeconfigs/` and `watch.audit_listen: ":8099"` |
+| Secret `scriven-kubeconfigs` | One kubeconfig per target, for Scriven's read-only identity there |
+| Secret `scriven-env` | `VAULT_TOKEN`, plus anything `env://` references need |
+| `images:` | The image name and tag in your registry |
+
+What the base sets up:
+
+- **Watcher:** a one-replica Deployment running `scriven watch --sweep-first`, so anything that changed while it was down is caught at start-up.
+- **Sweeper:** a CronJob running `scriven sweep` at 02:00 UTC.
+- **Audit webhook:** Service `scriven-audit` on port 8099. Point each API server's audit webhook at `/audit/<target-id>` on it.
+- **Lockdown:** the pods run as non-root with a read-only root filesystem, all capabilities dropped, and the `restricted` Pod Security level. They get **no** Kubernetes API rights in the cluster they run in. Every target, including the host cluster, is reached through its read-only kubeconfig.
+
+`scriven-lab/lab-incluster.sh` builds a complete overlay for the lab and is a working example.
+
 ## Lab quick start
 
 ```bash
@@ -82,6 +109,7 @@ export VAULT_TOKEN=root
 ../bin/scriven config set watch.audit_listen 127.0.0.1:8099   # the k3d API servers send audit events here
 ../bin/scriven watch        # in a second terminal
 ./lab-drift.sh              # 3 manual changes: expect 3 notifications and an `observed` PR
+./lab-incluster.sh          # run Scriven inside prod-sim instead (--down removes it)
 ./lab-down.sh               # --wipe also removes data volumes
 ```
 

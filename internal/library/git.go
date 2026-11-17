@@ -122,7 +122,7 @@ func (r *Repo) CommitFiles(ctx context.Context, branch, dir string, files map[st
 	}
 	changed := false
 	for _, f := range strings.Fields(out) {
-		if !strings.HasSuffix(f, "/catalog.yaml") {
+		if !bookkeeping(f) {
 			changed = true
 		}
 	}
@@ -145,4 +145,12 @@ func (r *Repo) DiffStat(ctx context.Context) string {
 		return ""
 	}
 	return strings.TrimSpace(out)
+}
+
+// bookkeeping reports files that differ between runs without the environment
+// having changed: catalog.yaml carries a timestamp, and Terraform's lock file
+// lists provider hashes for the platform scriven ran on (Windows vs Linux).
+// A difference in only these is not a change worth a commit or a notification.
+func bookkeeping(path string) bool {
+	return strings.HasSuffix(path, "/catalog.yaml") || strings.HasSuffix(path, "/.terraform.lock.hcl")
 }

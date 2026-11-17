@@ -1,0 +1,16 @@
+# Inbound: only the audit webhook port. Outbound is left open because targets,
+# the library, Vault and notification endpoints live wherever you run them;
+# tighten egress in your overlay once those addresses are known.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scriven
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: scriven
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: 8099
+          protocol: TCP

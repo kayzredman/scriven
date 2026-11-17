@@ -60,7 +60,7 @@ func (w *Watcher) logf(format string, a ...any) {
 func (w *Watcher) Run(ctx context.Context, sweepOnStart bool) error {
 	if addr := w.cfg.Watch.AuditListen; addr != "" {
 		w.audit = NewAuditStore()
-		srv := &http.Server{Addr: addr, Handler: w.audit, ReadHeaderTimeout: 10 * time.Second}
+		srv := &http.Server{Addr: addr, Handler: w.mux(), ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			w.logf("audit webhook listening on %s (POST /audit/<target-id>)", addr)
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -510,4 +510,15 @@ func (w *Watcher) sendChange(ctx context.Context, t config.Target, o outcome, pr
 	if err != nil {
 		w.logf("notification failed: %v", err)
 	}
+}
+
+// mux serves the audit webhook and a health check for Kubernetes probes.
+func (w *Watcher) mux() http.Handler {
+	m := http.NewServeMux()
+	m.Handle("/audit/", w.audit)
+	m.HandleFunc("/healthz", func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+		_, _ = rw.Write([]byte("ok\n"))
+	})
+	return m
 }

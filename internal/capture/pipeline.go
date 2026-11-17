@@ -265,6 +265,9 @@ func Run(ctx context.Context, t config.Target, opt Options) (*Result, error) {
 // pluginCache shares downloaded providers between captures, so the watcher
 // does not fetch the provider again for every change.
 func pluginCache() (string, error) {
+	if dir := os.Getenv("TF_PLUGIN_CACHE_DIR"); dir != "" {
+		return dir, nil // e.g. the cache baked into the container image
+	}
 	base, err := os.UserCacheDir()
 	if err != nil {
 		return "", err

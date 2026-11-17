@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -19,7 +20,7 @@ import (
 var cfgPath string
 
 func Execute() int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM) // SIGTERM: Kubernetes stopping the pod
 	defer stop()
 	root := &cobra.Command{
 		Use:           "scriven",

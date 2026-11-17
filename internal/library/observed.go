@@ -75,7 +75,7 @@ func (r *Repo) Commit(ctx context.Context, dir, message string) (bool, error) {
 	}
 	changed := false
 	for _, f := range strings.Fields(out) {
-		if !strings.HasSuffix(f, "/catalog.yaml") {
+		if !bookkeeping(f) {
 			changed = true
 		}
 	}

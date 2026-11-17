@@ -1,0 +1,24 @@
+# Scriven in-cluster base: the watcher (Deployment), the nightly sweep
+# (CronJob) and the audit webhook Service. Use it from an overlay that adds:
+#
+#   ConfigMap scriven-config        key scriven.yaml (kubeconfig paths under /etc/scriven/kubeconfigs/)
+#   Secret    scriven-kubeconfigs   one kubeconfig per target, for scriven's READ-ONLY identity there
+#   Secret    scriven-env           VAULT_TOKEN (and any env:// secrets scriven.yaml refers to)
+#   images:   name scriven -> your registry/tag
+#
+# See scriven-lab/lab-incluster.sh for a complete overlay.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: scriven-system
+labels:
+  - pairs:
+      app.kubernetes.io/name: scriven
+      app.kubernetes.io/part-of: scriven
+    includeSelectors: false
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - watch-deployment.yaml
+  - audit-service.yaml
+  - sweep-cronjob.yaml
+  - networkpolicy.yaml

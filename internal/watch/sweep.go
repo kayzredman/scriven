@@ -35,6 +35,9 @@ func (w *Watcher) Sweep(ctx context.Context, t config.Target) error {
 	}
 	defer repo.Close()
 	dir := res.Dir
+	if !repo.Exists(dir + "/main.tf") {
+		return fmt.Errorf("no baseline in the library at %s: run `scriven capture %s` and merge it first", dir, t.ID)
+	}
 	oldMain, _ := os.ReadFile(repo.Path(dir + "/main.tf"))
 	if err := os.RemoveAll(repo.Path(dir)); err != nil {
 		return err

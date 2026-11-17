@@ -22,7 +22,7 @@ var skipKinds = map[string]bool{
 }
 
 // Namespaces that belong to Kubernetes, k3s/RKE2, Rancher or scriven itself.
-var systemNamespaces = []string{"kube-system", "kube-public", "kube-node-lease", "scriven"}
+var systemNamespaces = []string{"kube-system", "kube-public", "kube-node-lease", "scriven", "scriven-system"}
 var systemNamespacePrefixes = []string{"cattle-", "fleet-", "rancher-", "local-path-"}
 
 // Per-namespace objects Kubernetes creates on its own.
