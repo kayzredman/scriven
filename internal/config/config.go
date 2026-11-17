@@ -41,8 +41,18 @@ type Watch struct {
 	// Daily full sweep time, local "HH:MM", to catch anything the watch missed.
 	// Empty disables the in-process sweep (run `scriven sweep` from cron instead).
 	SweepAt string `yaml:"sweep_at,omitempty"`
+	// How often AWS targets' CloudTrail event history is read, Go duration,
+	// default 60s. CloudTrail itself takes a few minutes to show a call.
+	AWSPoll string `yaml:"aws_poll,omitempty"`
 	// Kinds never watched or captured, e.g. [ConfigMap].
 	ExcludeKinds []string `yaml:"exclude_kinds,omitempty"`
+}
+
+func (w Watch) AWSPollDuration() time.Duration {
+	if d, err := time.ParseDuration(w.AWSPoll); err == nil && d > 0 {
+		return d
+	}
+	return time.Minute
 }
 
 func (w Watch) DebounceDuration() time.Duration {
@@ -332,6 +342,11 @@ func (c *Config) Validate() error {
 	if c.Watch.Debounce != "" {
 		if d, err := time.ParseDuration(c.Watch.Debounce); err != nil || d <= 0 {
 			add("watch.debounce: %q is not a positive duration such as 15s", c.Watch.Debounce)
+		}
+	}
+	if c.Watch.AWSPoll != "" {
+		if d, err := time.ParseDuration(c.Watch.AWSPoll); err != nil || d < 10*time.Second {
+			add("watch.aws_poll: %q is not a duration of at least 10s", c.Watch.AWSPoll)
 		}
 	}
 	if c.Watch.SweepAt != "" {

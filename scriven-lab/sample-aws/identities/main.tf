@@ -36,6 +36,7 @@ resource "aws_iam_user_policy" "readonly" {
         "lambda:Get*", "lambda:List*",
         "kms:Describe*", "kms:List*", "kms:GetKeyPolicy", "kms:GetKeyRotationStatus",
         "cloudformation:Describe*", "cloudformation:List*",
+        "cloudtrail:LookupEvents",
       ]
       Resource = "*"
     }]

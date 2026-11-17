@@ -28,6 +28,9 @@ func watchCmd() *cobra.Command {
 			"changes, scriven waits for it to settle (watch.debounce), re-captures only that resource,\n" +
 			"verifies it with a zero-diff plan, commits it to the observed branch, keeps one PR open\n" +
 			"against main, and notifies with the diff and who made the change.\n\n" +
+			"Watches each AWS target through CloudTrail's event history (watch.aws_poll, default 60s;\n" +
+			"needs cloudtrail:LookupEvents). A burst of write calls triggers a full re-capture, and each\n" +
+			"changed resource is committed on its own, naming the caller CloudTrail recorded.\n\n" +
 			"With watch.audit_listen set, point each API server's audit webhook at\n" +
 			"http://<scriven-host><audit_listen>/audit/<target-id> to name users in notifications.\n" +
 			"The same address serves /healthz and Prometheus metrics at /metrics.",

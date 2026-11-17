@@ -82,14 +82,29 @@ func (w *Watcher) Run(ctx context.Context, sweepOnStart bool) error {
 				w.logf("%s: %s targets are not supported yet, skipped", t.Key(), t.Platform)
 				continue
 			}
-			// No change feed for this platform yet: drift is found by sweeps.
-			w.logf("%s: not watched live; covered by sweeps only", t.Key())
-			sweepOnly++
 			if sweepOnStart {
 				if err := w.Sweep(ctx, t); err != nil {
 					w.logf("%s: start-up sweep failed: %v", t.Key(), err)
 				}
 			}
+			if t.Platform != "aws" {
+				w.logf("%s: not watched live; covered by sweeps only", t.Key())
+				sweepOnly++
+				continue
+			}
+			aw := w.newAWSWatch(t)
+			if err := aw.check(ctx); err != nil {
+				// No access to CloudTrail (or an emulator without it): sweeps still find drift.
+				w.logf("%s: not watched live (reading CloudTrail failed: %v); covered by sweeps only", t.Key(), err)
+				w.metrics.Set("scriven_target_watched", 0, "target", t.Key())
+				sweepOnly++
+				continue
+			}
+			w.logf("%s: watching CloudTrail every %s", t.Key(), aw.poll)
+			started++
+			w.metrics.Set("scriven_target_watched", 1, "target", t.Key())
+			wg.Add(1)
+			go func() { defer wg.Done(); aw.run(ctx) }()
 			continue
 		}
 		if sweepOnStart {

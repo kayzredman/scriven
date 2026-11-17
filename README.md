@@ -78,7 +78,7 @@ The wizard sets `branch: <env>-library` by itself in that case. On first use, Sc
 - **Who:** with `watch.audit_listen` set, each API server's audit webhook posts to `http://<scriven>/audit/<target-id>`. Notifications then name the user and the action (e.g. `alice via kubectl patch/scale`). This needs no access to nodes or log files. Without it, Scriven names the tool from `managedFields`. A change whose user agent is Terraform is labelled "expected" rather than "drift".
 - **Metrics:** the `watch.audit_listen` address also serves Prometheus metrics at `/metrics`: changes recorded (drift or expected), recording errors, sweeps by result with their duration and time, audit events received and failed notifications. Alert on `scriven_last_successful_sweep_timestamp_seconds` growing old. The sweep CronJob is a separate process and reports nothing here.
 
-Settings (`scriven config set watch.<key> <value>`): `debounce` (e.g. `10s`), `audit_listen` (e.g. `127.0.0.1:8099`), `sweep_at` (e.g. `02:00`), `exclude_kinds` (e.g. `"[ConfigMap]"`).
+Settings (`scriven config set watch.<key> <value>`): `debounce` (e.g. `10s`), `audit_listen` (e.g. `127.0.0.1:8099`), `sweep_at` (e.g. `02:00`), `aws_poll` (e.g. `60s`), `exclude_kinds` (e.g. `"[ConfigMap]"`).
 
 `vault://` references need `VAULT_TOKEN` in the environment. The address comes from `vault.addr` in `scriven.yaml` or from `VAULT_ADDR`.
 
@@ -111,7 +111,8 @@ One target is one account and region. The six steps are the same as for a cluste
 5. **Verify:** `terraform plan` against the live account must show no changes.
 6. **Commit:** as for a cluster. The library holds no credentials and no endpoint.
 
-AWS targets are not watched live yet. `scriven sweep` finds their drift, without naming who made the change.
+**Live watching for AWS:** `scriven watch` reads each AWS target's CloudTrail event history every minute (`watch.aws_poll`). Every account keeps 90 days of this history for free, and no trail is needed. Only successful write calls to the captured services count. Calls to IAM are read from `us-east-1`, where CloudTrail records them. After a burst of calls goes quiet, Scriven re-captures the target in full and checks it at zero diff. It then commits each resource whose code changed separately on the observed branch, naming the CloudTrail caller that touched it, e.g. `user/alice via console`, with the API call and its time. Calls made by Terraform are labelled as expected changes. CloudTrail takes a few minutes to show a call, so changes arrive within minutes, not seconds. The identity needs `cloudtrail:LookupEvents`. Without it, or on an emulator, the target is covered by sweeps only, and the watcher says so at start-up.
+
 
 ## Running in a cluster
 

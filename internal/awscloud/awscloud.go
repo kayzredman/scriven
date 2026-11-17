@@ -148,7 +148,7 @@ var mustNotAllow = []string{
 	"dynamodb:PutItem", "dynamodb:DeleteTable", "sns:DeleteTopic", "sns:SetTopicAttributes",
 	"lambda:UpdateFunctionCode", "lambda:InvokeFunction", "rds:DeleteDBInstance", "rds:ModifyDBInstance",
 	"elasticloadbalancing:DeleteLoadBalancer", "elasticloadbalancing:ModifyListener",
-	"kms:ScheduleKeyDeletion", "kms:PutKeyPolicy", "cloudformation:CreateStack", "cloudformation:DeleteStack",
+	"kms:ScheduleKeyDeletion", "kms:PutKeyPolicy", "cloudformation:CreateStack", "cloudformation:DeleteStack", "cloudtrail:StopLogging", "cloudtrail:DeleteTrail",
 	"secretsmanager:GetSecretValue", "kms:Decrypt",
 }
 

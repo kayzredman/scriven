@@ -118,3 +118,20 @@ var errBoom = errorString("boom")
 type errorString string
 
 func (e errorString) Error() string { return string(e) }
+
+func TestImportIDs(t *testing.T) {
+	src := []byte(`import {
+  to = aws_security_group.shop_web
+  id = "sg-0abc"
+}
+
+import {
+  to = aws_iam_role_policy_attachment.app_read
+  id = "shop-app/arn:aws:iam::1:policy/read"
+}
+`)
+	got := importIDs(src)
+	if got["aws_security_group.shop_web"] != "sg-0abc" || got["aws_iam_role_policy_attachment.app_read"] != "shop-app/arn:aws:iam::1:policy/read" {
+		t.Errorf("importIDs = %v", got)
+	}
+}

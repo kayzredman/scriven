@@ -25,6 +25,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.12 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.12 // indirect
 	github.com/aws/aws-sdk-go-v2/service/cloudformation v1.84.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/cloudtrail v1.65.12 // indirect
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.74.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.348.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2 v1.64.0 // indirect

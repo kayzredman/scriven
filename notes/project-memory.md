@@ -66,9 +66,8 @@ The online Blueprint and Whiteboard still describe the tfk8s / manifest route fo
 - **Emulator plumbing, kept out of the library:** with `endpoint` set, the scratch directory gets an override file (`s3_use_path_style`), and Terraform runs with `HTTP_PROXY` pointing at the emulator. The provider calls S3 Control at `<account-id>.<host>`, which does not resolve locally; sent through the emulator as a proxy, the request arrives.
 - **Lab Moto is patched:** `scriven-lab/moto/Dockerfile` pins 5.2.5 and makes S3 Control use Moto's S3 signer. Without it, with IAM enforcement on, reading bucket tags fails for every identity and no bucket can be imported.
 - **IAM is global:** a target with `global_resources: false` skips IAM. Validation refuses two targets that log in the same way (same profile, keys, role and endpoint) and would both capture IAM. Targets that reach the same account through different logins are not detected.
-- **Sweep only:** AWS targets are not watched live. `scriven watch` logs that and sweeps them (`--sweep-first`, `watch.sweep_at`). Drift notifications cannot name who made the change. CloudTrail or EventBridge is the likely feed.
+- **Live watching (2026-11-17):** see "AWS live watching" below. Before that, AWS targets were sweep-only.
 - **Not done yet:**
-  - Live watching.
   - More resource types: Auto Scaling groups, launch templates, Aurora clusters, listener rules, SQS (see above), ECS/EKS, CloudFront, Route 53.
   - Generated code keeps every `false` default, so it is wordier than a person would write.
 
@@ -112,3 +111,13 @@ The online Blueprint and Whiteboard still describe the tfk8s / manifest route fo
 - **GitHub Actions** (`.github/workflows/ci.yml`): on every push to `dev` or `main` and every PR, `gofmt -l`, `go vet`, `go test -race` and a build. On a push to `main` or a `v*` tag, the image is built and pushed to `ghcr.io/<owner>/<repo>` (tags: short SHA, `latest` on main, the version on tags), using `GITHUB_TOKEN` and the Actions build cache. `dev` pushes skip the image because it downloads about 1 GB of providers.
 - **Unit tests need no Terraform, cluster or emulator**, so CI runs them on a bare runner. The lab acceptance checks stay manual.
 - Verified before the first run: the same steps pass in `golang:1.27` on Linux, including the race detector (this Windows host has no C compiler for `-race`).
+
+## AWS live watching (2026-11-17)
+
+- **Feed:** CloudTrail `LookupEvents` (event history), polled every `watch.aws_poll` (default 60s), filtered to `ReadOnly=false` and to the services scriven captures. Failed calls (`errorCode` set) are dropped. IAM events live in `us-east-1`, so a target that captures global resources reads that region too, for IAM only. No trail, EventBridge rule or queue is needed, so nothing is created in the account and it costs nothing. EventBridge → SQS would cut delivery to seconds; it was left as a later option because it needs resources created in the account.
+- **Delivery delay:** CloudTrail shows calls after a few minutes, and not always in order. Each poll looks back 20 minutes and skips event IDs already seen.
+- **Recording:** a burst of calls (quiet for `watch.debounce`) triggers one full capture of the target, rather than per-resource re-capture: AWS code is full of cross-references, which only a full capture links correctly. The result is compared with the observed branch, and each differing resource gets its own commit and notification.
+- **Attribution:** each event's identifiers (every string in its request and response, plus the resources CloudTrail lists) are matched against the import ID of each changed resource. They match exactly, or as its owner (role → its policies, route table → its associations), or as an ARN ending in the ID. The latest matching call names the caller: `user/alice`, `assumed-role/admin/bob`, `root`, or the AWS service acting. Its user agent names the tool (console, Terraform, aws-cli...). A change no call names is recorded as "unknown".
+- **Fallback:** if `LookupEvents` fails at start-up (no permission, or Moto, which does not implement it), the target is sweep-only, as before, and the log says why.
+- **Read-only check:** `cloudtrail:StopLogging` and `cloudtrail:DeleteTrail` added to the refuse list.
+- **Lab:** cannot be tested on Moto. The real sandbox needs the updated template (adds `cloudtrail:LookupEvents`).
