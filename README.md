@@ -5,7 +5,7 @@ Captures deployed infrastructure (Rancher on-prem, AWS, Azure, GCP) as Terraform
 **Status:**
 
 - **Rancher/Kubernetes:** done. The setup wizard, the one-shot capture, and the watcher with its sweeper all work, and Scriven also runs inside a cluster as a Deployment plus a nightly CronJob.
-- **AWS:** capture and sweep work for a first set of 14 resource types. Tested against the Moto emulator in the lab, and against one real AWS sandbox account, where the read-only check and the zero-diff capture passed. Live watching is not built.
+- **AWS:** capture and sweep work for 25 resource types, from VPCs to load balancers, RDS, Lambda and KMS. Tested against the Moto emulator in the lab. The read-only check and a zero-diff capture of the first 14 types also passed in one real AWS sandbox account. Live watching is not built.
 - **Azure and GCP:** not built.
 
 All lab acceptance checks pass.
@@ -53,6 +53,19 @@ go test ./...
 | `scriven watch` | Follows every target's watch API and records each change on the library's `observed` branch: one commit per resource, one open PR, and a notification with the diff and who made the change. `--sweep-first` runs a sweep before watching |
 | `scriven sweep [target]` | Full re-capture. Any difference from the library goes to `observed`. This is the nightly safety net (run it from cron, or set `watch.sweep_at`) |
 
+## Merge policy and library branches
+
+`merge_policy` says, per environment, how a capture PR merges: `approvals: N` or `auto_merge: true`. Git hosts set required approvals per branch, not per environment, so an auto-merged environment cannot share `main` with one that needs approvals. Such an environment gets its own branch:
+
+```yaml
+merge_policy:
+  default: {approvals: 1}
+  prod:    {approvals: 2}
+  dev:     {auto_merge: true, branch: dev-library}
+```
+
+The wizard sets `branch: <env>-library` by itself in that case. On first use, Scriven creates the branch empty apart from a README, so it holds only that environment's code. Capture PRs for `dev` then merge into `dev-library`. The watcher records `dev`'s changes on `observed-dev-library`, with its own PR into `dev-library`. The merge-policy check tests protection on each branch: a branch that only auto-merged environments use doesn't need protecting.
+
 ## How the watcher works
 
 - **Feed:** a Kubernetes informer (list + watch, read-only) for every kind Scriven captures. It uses the same filter as a full capture, so system objects, controller-owned objects and Helm-managed objects are ignored.
@@ -68,7 +81,7 @@ Settings (`scriven config set watch.<key> <value>`): `debounce` (e.g. `10s`), `a
 
 ## How a Rancher capture works
 
-1. **Discover:** connects with the read-only identity and **refuses to go on** if that identity can write anything or read Secrets. It then lists every resource kind and skips system namespaces, objects owned by controllers, built-in k3s/RKE2/Rancher objects and Helm-managed objects.
+1. **Discover:** connects with the read-only identity and **refuses to go on** if that identity can write anything or read Secrets. It then lists every resource kind and skips system namespaces, objects owned by controllers, built-in k3s/RKE2/Rancher objects and Helm-managed objects. Helm releases are recorded in `catalog.yaml` by chart, chart version and app version, read from the objects' labels. Scriven never reads the release Secrets that hold their values.
 2. **Import blocks:** writes one `import {}` per object, into the provider's typed resources (`kubernetes_deployment_v1` and so on). Kinds with no typed resource are recorded as not captured.
 3. **Generate HCL:** runs `terraform plan -generate-config-out`.
 4. **Clean up:**
@@ -83,13 +96,15 @@ Settings (`scriven config set watch.<key> <value>`): `debounce` (e.g. `10s`), `a
 
 One target is one account and region. The six steps are the same as for a cluster; what differs:
 
-1. **Discover:** logs in with the read-only identity (a profile, access keys given as secret references, or the default AWS credential chain) and **refuses to go on** if that identity can write. The check is IAM policy simulation of 26 write and secret-read actions. Where the identity may not simulate, Scriven falls back to EC2 dry-run requests, which is a weaker check, and says so in `catalog.yaml`. The default VPC, each VPC's main route table and default security group, service-linked roles, and CloudFormation's `cf-templates-` upload bucket are left out and listed.
-2. **Import blocks:** one per resource. Covered types: VPCs, subnets, internet gateways, route tables and their associations, security groups, S3 buckets and versioning, IAM roles with their inline and attached policies, customer-managed IAM policies, DynamoDB tables and SNS topics. Nothing else in the account is captured yet, and `catalog.yaml` says so.
+1. **Discover:** logs in with the read-only identity (a profile, access keys given as secret references, or the default AWS credential chain), then assumes `role_arn` if the target sets one (with `external_id` if the role's trust policy asks for it). Scriven **refuses to go on** if the identity can write. The check is IAM policy simulation of 35 write and secret-read actions. It also simulates 7 data reads, such as `s3:GetObject` and `dynamodb:Scan`. Those are allowed with a warning in `catalog.yaml` (`data_reads`), because AWS's own `ReadOnlyAccess` grants them; a target with `metadata_only: true` refuses them instead. Where the identity may not simulate, Scriven falls back to EC2 dry-run requests, which is a weaker check, and says so in `catalog.yaml`. The default VPC, each VPC's main route table and default security group, service-linked roles, AWS-managed KMS keys, instances an Auto Scaling group launched, and CloudFormation's `cf-templates-` upload bucket are left out and listed. **Resources a CloudFormation stack manages are left out too**, as Helm-managed objects are, and `catalog.yaml` lists the stacks with a count each: the stack template is their code. IAM is account-wide, so with several targets in one account, set `global_resources: false` on all but one of them; validation catches two targets that would both capture it.
+2. **Import blocks:** one per resource. Covered types: VPCs, subnets, internet gateways, route tables and their associations, security groups, Elastic IPs, NAT gateways, EC2 instances, load balancers with their listeners and target groups, S3 buckets and versioning, IAM roles with their inline and attached policies, customer-managed IAM policies, DynamoDB tables, SNS topics, RDS DB instances and subnet groups, Lambda functions, and KMS keys with their aliases. Nothing else in the account is captured yet, and `catalog.yaml` says so.
 3. **Generate HCL:** as for a cluster. A resource Terraform cannot import is left out and listed, with the reason.
 4. **Clean up:**
    - Removes empty and zero values, `tags_all`, the per-resource `region`, and values AWS assigns.
    - **Replaces literal IDs with references**, such as `vpc_id = aws_vpc.shop.id`. The code then works in an account where AWS hands out different IDs. A reference that would create a cycle stays a literal.
    - **Makes strings portable:** inside policies, ARNs and names, a captured resource's ARN at the start of a longer value becomes `"${aws_s3_bucket.assets.arn}/*"`, the account ID becomes `data.aws_caller_identity.current.account_id`, and the region inside an ARN becomes `var.aws_region`.
+   - **Lambda code is not captured:** Scriven reads a function's configuration, never its code. Each function gets `filename = "${path.module}/lambda/<name>.zip"`, with `ignore_changes = [filename]` so the plan stays at zero diff. Put the package there before rebuilding the function elsewhere.
+   - **Database passwords are not captured.** Supply one, for example in an override file, before creating a DB instance from the code.
 5. **Verify:** `terraform plan` against the live account must show no changes.
 6. **Commit:** as for a cluster. The library holds no credentials and no endpoint.
 
@@ -175,7 +190,13 @@ Needs Docker with Compose, k3d, kubectl and helm. Lab credentials go in `scriven
 AWS, against Moto:
 
 - [x] Wizard accepts an AWS target and its live test passes
-- [x] Full capture of `shop-lab` (16 resources) passes the zero-diff check
-- [x] Replay of that capture into an empty emulator creates all 16 resources, and a new plan shows no changes (`lab-aws-replay.sh`)
+- [x] Full capture of `shop-lab` (30 resources of 25 types) passes the zero-diff check
+- [x] Replay of that capture into an empty emulator creates all 30 resources, and a new plan shows no changes (`lab-aws-replay.sh`, which supplies the Lambda package and a database password, as an operator would)
+- [x] Resources of a CloudFormation stack are left out, and `catalog.yaml` lists the stack
 - [x] After `lab-aws.sh --drift`, a sweep records 1 new, 1 changed and 1 removed resource on the `observed` PR and notifies
 - [x] An identity that can write (`lab-admin`) is refused
+
+Library branches:
+
+- [x] With `dev: {auto_merge: true, branch: dev-library}`, a dev capture creates `dev-library` (README only), opens its PR there and merges it without approvals while `main` requires 2
+- [x] A dev sweep records on `observed-dev-library`, with its PR into `dev-library`

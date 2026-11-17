@@ -440,6 +440,7 @@ func (w *Wizard) merge(ctx context.Context, c *config.Config) error {
 				w.printf("    answer auto or a number\n")
 			}
 		}
+		separateAutoMerge(policy, prevBranches(c.MergePolicy), w.printf)
 		c.MergePolicy = policy
 		ok, err := w.report(checks.Merge(ctx, c))
 		if err != nil {
@@ -481,4 +482,40 @@ func orList(s, d []string) []string {
 		return d
 	}
 	return s
+}
+
+func prevBranches(p map[string]config.MergeRule) map[string]string {
+	out := map[string]string{}
+	for e, r := range p {
+		out[e] = r.Branch
+	}
+	return out
+}
+
+// separateAutoMerge gives each auto-merged environment its own library branch
+// when another environment needs approvals: Git hosts set required approvals
+// per branch, so on a shared main the auto-merge would be blocked.
+func separateAutoMerge(policy map[string]config.MergeRule, prev map[string]string, printf func(string, ...any)) {
+	reviewed := false
+	for _, r := range policy {
+		reviewed = reviewed || r.Approvals > 0
+	}
+	envs := make([]string, 0, len(policy))
+	for e := range policy {
+		envs = append(envs, e)
+	}
+	slices.Sort(envs)
+	for _, e := range envs {
+		r := policy[e]
+		switch {
+		case !r.AutoMerge:
+			continue
+		case prev[e] != "":
+			r.Branch = prev[e]
+		case reviewed:
+			r.Branch = e + "-library"
+			printf("    %s merges automatically into its own library branch, %s, because other environments need approvals\n", e, r.Branch)
+		}
+		policy[e] = r
+	}
 }

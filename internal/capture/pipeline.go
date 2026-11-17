@@ -43,13 +43,23 @@ type CatalogSource struct {
 	Identity string `yaml:"identity"`
 	// How the identity was shown to be read-only, when there is more than one way.
 	ReadOnlyCheck string `yaml:"read_only_check,omitempty"`
+	// Data, as opposed to configuration, the identity could read (AWS). Not
+	// used by scriven; listed so reviewers can narrow the identity.
+	DataReads []string `yaml:"data_reads,omitempty"`
 }
 
 type Uncaptured struct {
-	HelmReleases    []HelmRelease `yaml:"helm_releases,omitempty"`
-	UnreadableKinds []string      `yaml:"unreadable_kinds,omitempty"`
-	Skipped         []Skipped     `yaml:"skipped,omitempty"`
-	Note            string        `yaml:"note,omitempty"`
+	HelmReleases []HelmRelease `yaml:"helm_releases,omitempty"`
+	// AWS: CloudFormation stacks whose resources were left out, with how many.
+	CloudFormationStacks []ManagedStack `yaml:"cloudformation_stacks,omitempty"`
+	UnreadableKinds      []string       `yaml:"unreadable_kinds,omitempty"`
+	Skipped              []Skipped      `yaml:"skipped,omitempty"`
+	Note                 string         `yaml:"note,omitempty"`
+}
+
+type ManagedStack struct {
+	Name      string `yaml:"name"`
+	Resources int    `yaml:"resources"`
 }
 
 type Result struct {
@@ -269,8 +279,9 @@ func Run(ctx context.Context, t config.Target, opt Options) (*Result, error) {
 		},
 	}
 	if len(d.HelmReleases) > 0 {
-		cat.Uncaptured.Note = "Helm releases keep their values in Secrets, which the read-only identity cannot read. " +
-			"Their objects are left out so the library does not fight Helm; capture them as helm_release once values are available."
+		cat.Uncaptured.Note = "Helm releases are recorded by chart and version only. Their values live in release Secrets, " +
+			"which scriven never reads (Kubernetes RBAC cannot grant read on those Secrets without all the others). " +
+			"Their objects are left out so the library does not fight Helm."
 	}
 	cy, err := yaml.Marshal(cat)
 	if err != nil {

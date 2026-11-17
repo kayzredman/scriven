@@ -88,7 +88,7 @@ notify:
     from: scriven@lab.local
 merge_policy:
   default: {approvals: 1}
-  dev: {auto_merge: true}
+  dev: {auto_merge: true, branch: dev-library}  # main needs approvals, so dev merges into its own branch
   prod: {approvals: 2}
 vault:
   addr: http://vault:8200

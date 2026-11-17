@@ -3,6 +3,7 @@ package awscloud
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -20,9 +21,12 @@ import (
 // Everything else in the account is left alone and named in catalog.yaml.
 var Covered = []string{
 	"aws_vpc", "aws_subnet", "aws_internet_gateway", "aws_route_table", "aws_route_table_association",
-	"aws_security_group", "aws_s3_bucket", "aws_s3_bucket_versioning",
+	"aws_security_group", "aws_eip", "aws_nat_gateway", "aws_instance",
+	"aws_lb", "aws_lb_target_group", "aws_lb_listener",
+	"aws_s3_bucket", "aws_s3_bucket_versioning",
 	"aws_iam_role", "aws_iam_role_policy", "aws_iam_policy", "aws_iam_role_policy_attachment",
-	"aws_dynamodb_table", "aws_sns_topic",
+	"aws_dynamodb_table", "aws_sns_topic", "aws_db_subnet_group", "aws_db_instance",
+	"aws_lambda_function", "aws_kms_key", "aws_kms_alias",
 }
 
 // Item is one resource to capture.
@@ -31,6 +35,12 @@ type Item struct {
 	ID   string // the ID `terraform import` takes
 	Name string // readable name, used for the Terraform address
 	Refs []Ref  // values other resources use to point at this one
+	// Owner is the ID of the item this one belongs to (a route table's
+	// association, a role's policy): it goes wherever its owner goes.
+	Owner string
+	// AltIDs are other identifiers AWS uses for the item (an Elastic IP's
+	// address), matched when looking for CloudFormation-managed resources.
+	AltIDs []string
 }
 
 // Ref is a value that identifies an item. Where it appears in another
@@ -52,26 +62,58 @@ type Inventory struct {
 	Items      []Item
 	Skipped    []Skipped
 	Unreadable []string // services the identity may not list
+	// CloudFormation stacks whose resources were left out, and how many each.
+	Stacks map[string]int
+}
+
+// DiscoverOptions narrows what Discover lists.
+type DiscoverOptions struct {
+	// Global includes account-wide resources (IAM). With several targets for
+	// one account, only one should.
+	Global bool
 }
 
 // Discover lists what the identity can see. A service it may not list is
-// recorded and skipped; any other failure stops the capture.
-func (c *Client) Discover(ctx context.Context) (*Inventory, error) {
+// recorded and skipped; any other failure stops the capture. Resources a
+// CloudFormation stack manages are left out, as Helm-managed objects are for
+// Kubernetes: the library would otherwise fight the stack.
+func (c *Client) Discover(ctx context.Context, opt DiscoverOptions) (*Inventory, error) {
 	inv := &Inventory{}
 	steps := []struct {
 		service string
 		fn      func(context.Context, *Inventory) error
 	}{
-		{"ec2", c.network}, {"s3", c.buckets}, {"iam", c.identity}, {"dynamodb", c.tables}, {"sns", c.topics},
+		{"ec2", c.network}, {"ec2", c.compute}, {"elasticloadbalancing", c.loadBalancers},
+		{"s3", c.buckets}, {"dynamodb", c.tables}, {"sns", c.topics}, {"rds", c.databases},
+		{"lambda", c.functions}, {"kms", c.keys},
+	}
+	if opt.Global {
+		steps = append(steps, struct {
+			service string
+			fn      func(context.Context, *Inventory) error
+		}{"iam", c.identity})
+	} else {
+		inv.skip("aws_iam_*", "(all)", "account-wide: this target has global_resources: false, another target of the account captures IAM")
 	}
 	for _, s := range steps {
 		if err := s.fn(ctx, inv); err != nil {
 			if denied(err) {
-				inv.Unreadable = append(inv.Unreadable, s.service)
+				if !slices.Contains(inv.Unreadable, s.service) {
+					inv.Unreadable = append(inv.Unreadable, s.service)
+				}
 				continue
 			}
 			return nil, fmt.Errorf("listing %s: %w", s.service, err)
 		}
+	}
+	managed, err := c.stackResources(ctx)
+	switch {
+	case denied(err):
+		inv.Unreadable = append(inv.Unreadable, "cloudformation (resources stacks manage could not be told apart)")
+	case err != nil:
+		return nil, fmt.Errorf("listing cloudformation: %w", err)
+	default:
+		inv.leaveOutManaged(managed)
 	}
 	sort.SliceStable(inv.Items, func(i, j int) bool {
 		a, b := inv.Items[i], inv.Items[j]
@@ -81,6 +123,49 @@ func (c *Client) Discover(ctx context.Context) (*Inventory, error) {
 		return a.ID < b.ID
 	})
 	return inv, nil
+}
+
+// leaveOutManaged removes items a CloudFormation stack manages (managed maps
+// physical resource IDs to stack names), with the items that belong to them.
+func (inv *Inventory) leaveOutManaged(managed map[string]string) {
+	stackOf := func(it Item) string {
+		for _, id := range append([]string{it.ID, it.Owner}, it.AltIDs...) {
+			if id == "" {
+				continue
+			}
+			if s, ok := managed[id]; ok {
+				return s
+			}
+			if s, ok := managed[strings.ToLower(id)]; ok {
+				return s
+			}
+		}
+		return ""
+	}
+	// Owners first, so an owned item follows its owner even when CloudFormation
+	// does not list it separately (a role's attached policies).
+	gone := map[string]string{}
+	for _, it := range inv.Items {
+		if s := stackOf(it); s != "" {
+			gone[it.ID] = s
+		}
+	}
+	var keep []Item
+	for _, it := range inv.Items {
+		s := gone[it.ID]
+		if s == "" && it.Owner != "" {
+			s = gone[it.Owner]
+		}
+		if s == "" {
+			keep = append(keep, it)
+			continue
+		}
+		if inv.Stacks == nil {
+			inv.Stacks = map[string]int{}
+		}
+		inv.Stacks[s]++
+	}
+	inv.Items = keep
 }
 
 func nameTag(tags []ec2types.Tag, fallback string) string {
@@ -94,6 +179,11 @@ func nameTag(tags []ec2types.Tag, fallback string) string {
 
 func (inv *Inventory) add(typ, id, name string, refs ...Ref) {
 	inv.Items = append(inv.Items, Item{Type: typ, ID: id, Name: name, Refs: refs})
+}
+
+// addOwned adds an item that belongs to another (see Item.Owner).
+func (inv *Inventory) addOwned(owner, typ, id, name string, refs ...Ref) {
+	inv.Items = append(inv.Items, Item{Type: typ, ID: id, Name: name, Refs: refs, Owner: owner})
 }
 
 func (inv *Inventory) skip(kind, name, reason string) {
@@ -180,7 +270,7 @@ func (c *Client) network(ctx context.Context, inv *Inventory) error {
 			inv.add("aws_route_table", id, name, Ref{Value: id, Attr: "id"})
 			for _, a := range rt.Associations {
 				if sub := aws.ToString(a.SubnetId); sub != "" {
-					inv.add("aws_route_table_association", sub+"/"+id, names[sub]+"_"+name)
+					inv.addOwned(id, "aws_route_table_association", sub+"/"+id, names[sub]+"_"+name)
 				}
 			}
 		}
@@ -248,7 +338,7 @@ func (c *Client) buckets(ctx context.Context, inv *Inventory) error {
 			return err
 		}
 		if v.Status != "" {
-			inv.add("aws_s3_bucket_versioning", name, name)
+			inv.addOwned(name, "aws_s3_bucket_versioning", name, name)
 		}
 	}
 	return nil
@@ -291,7 +381,7 @@ func (c *Client) identity(ctx context.Context, inv *Inventory) error {
 					return err
 				}
 				for _, a := range ps.AttachedPolicies {
-					inv.add("aws_iam_role_policy_attachment", name+"/"+aws.ToString(a.PolicyArn), name+"_"+aws.ToString(a.PolicyName))
+					inv.addOwned(name, "aws_iam_role_policy_attachment", name+"/"+aws.ToString(a.PolicyArn), name+"_"+aws.ToString(a.PolicyName))
 				}
 			}
 			ip := iam.NewListRolePoliciesPaginator(i, &iam.ListRolePoliciesInput{RoleName: r.RoleName})
@@ -301,7 +391,7 @@ func (c *Client) identity(ctx context.Context, inv *Inventory) error {
 					return err
 				}
 				for _, pn := range ps.PolicyNames {
-					inv.add("aws_iam_role_policy", name+":"+pn, name+"_"+pn)
+					inv.addOwned(name, "aws_iam_role_policy", name+":"+pn, name+"_"+pn)
 				}
 			}
 		}

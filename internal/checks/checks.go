@@ -12,6 +12,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"scriven/internal/awscloud"
 	"scriven/internal/capture"
 	"scriven/internal/config"
 	"scriven/internal/k8s"
@@ -79,16 +80,16 @@ func awsTarget(ctx context.Context, cfg *config.Config, t config.Target, r Resul
 		r.Err = err
 		return r
 	}
-	bad, method, err := c.ReadOnlyViolations(ctx)
+	method, dataReads, err := capture.CheckAWSReadOnly(ctx, c, t)
 	if err != nil {
 		r.Err = err
 		return r
 	}
-	if len(bad) > 0 {
-		r.Err = fmt.Errorf("identity %s is not read-only (scriven refuses to use it):\n      - %s", c.ARN, strings.Join(bad, "\n      - "))
-		return r
+	if len(dataReads) > 0 {
+		r.Warnings = append(r.Warnings, "the identity can read data, not just configuration: "+strings.Join(dataReads, ", ")+
+			"; set metadata_only: true on the target to refuse such an identity")
 	}
-	inv, err := c.Discover(ctx)
+	inv, err := c.Discover(ctx, awscloud.DiscoverOptions{Global: t.CapturesGlobal()})
 	if err != nil {
 		r.Err = err
 		return r
@@ -149,7 +150,8 @@ func Notify(ctx context.Context, c *config.Config) Result {
 	return r
 }
 
-// Merge: branch protection on main must be able to enforce the policy.
+// Merge: branch protection on each library branch must be able to enforce
+// the merge policy of the environments that merge into it.
 func Merge(ctx context.Context, c *config.Config) Result {
 	r := Result{Step: "merge policy"}
 	token, err := Resolver(c).Resolve(c.Library.Credentials)
@@ -162,48 +164,81 @@ func Merge(ctx context.Context, c *config.Config) Result {
 		r.Err = err
 		return r
 	}
-	p, err := f.Protection(ctx, c.Library.MainBranch())
-	if errors.Is(err, library.ErrNoAPI) {
-		r.Warnings = append(r.Warnings, "cannot check branch protection on plain git; make sure main is protected")
-		return r
-	}
-	if err != nil {
-		r.Err = err
-		return r
-	}
-	main := c.Library.MainBranch()
-	maxApprovals, maxEnv := 0, ""
-	var autoEnvs []string
-	envs := make([]string, 0, len(c.MergePolicy))
+	// Every environment that has a rule or a target, grouped by base branch.
+	envSet := map[string]bool{"default": true}
 	for e := range c.MergePolicy {
+		envSet[e] = true
+	}
+	for _, t := range c.Scope.Targets {
+		envSet[t.Env] = true
+	}
+	envs := make([]string, 0, len(envSet))
+	for e := range envSet {
 		envs = append(envs, e)
 	}
 	sort.Strings(envs)
+	byBase := map[string][]string{}
+	var bases []string
 	for _, e := range envs {
-		rule := c.MergePolicy[e]
-		if rule.AutoMerge {
-			autoEnvs = append(autoEnvs, e)
+		b := c.BaseBranch(e)
+		if byBase[b] == nil {
+			bases = append(bases, b)
 		}
-		if rule.Approvals > maxApprovals {
-			maxApprovals, maxEnv = rule.Approvals, e
+		byBase[b] = append(byBase[b], e)
+	}
+	var errs, details []string
+	for _, base := range bases {
+		maxApprovals, maxEnv := 0, ""
+		var autoEnvs []string
+		for _, e := range byBase[base] {
+			rule := c.Rule(e)
+			if rule.AutoMerge {
+				autoEnvs = append(autoEnvs, e)
+			}
+			if rule.Approvals > maxApprovals {
+				maxApprovals, maxEnv = rule.Approvals, e
+			}
+		}
+		p, err := f.Protection(ctx, base)
+		if errors.Is(err, library.ErrNoAPI) {
+			r.Warnings = append(r.Warnings, "cannot check branch protection on plain git; make sure "+base+" is protected")
+			continue
+		}
+		if err != nil {
+			r.Err = err
+			return r
+		}
+		reviewed := maxApprovals > 0 || len(autoEnvs) < len(byBase[base])
+		switch {
+		case !reviewed:
+			// Only auto-merged environments: protection is optional.
+		case !p.Protected:
+			errs = append(errs, fmt.Sprintf("%s is not protected: anyone with write access can change verified captures. Protect it and require %d approval(s)", base, maxApprovals))
+		case p.DirectPushAllowed:
+			errs = append(errs, fmt.Sprintf("%s allows direct pushes: changes must go through PRs. Disable direct push on %s", base, base))
+		case p.RequiredApprovals < maxApprovals:
+			errs = append(errs, fmt.Sprintf("%s requires %d approval(s), but merge_policy.%s asks for %d. Raise required approvals on %s to %d",
+				base, p.RequiredApprovals, maxEnv, maxApprovals, base, maxApprovals))
+		}
+		if len(autoEnvs) > 0 && p.RequiredApprovals > 0 {
+			r.Warnings = append(r.Warnings, fmt.Sprintf("auto_merge for %s will be blocked by %s's %d required approval(s). "+
+				"Give those environments their own library branch (merge_policy.<env>.branch, e.g. %s-library)",
+				strings.Join(autoEnvs, ", "), base, p.RequiredApprovals, autoEnvs[0]))
+		}
+		switch {
+		case !reviewed && !p.Protected:
+			details = append(details, base+" (auto-merge only, not protected)")
+		case !reviewed:
+			details = append(details, base+" (auto-merge only)")
+		default:
+			details = append(details, fmt.Sprintf("%s is protected, PR-only, %d approval(s) required", base, p.RequiredApprovals))
 		}
 	}
-	switch {
-	case !p.Protected:
-		r.Err = fmt.Errorf("%s is not protected: anyone with write access can change verified captures. Protect it and require %d approval(s)", main, maxApprovals)
-	case p.DirectPushAllowed:
-		r.Err = fmt.Errorf("%s allows direct pushes: changes must go through PRs. Disable direct push on %s", main, main)
-	case p.RequiredApprovals < maxApprovals:
-		r.Err = fmt.Errorf("%s requires %d approval(s), but merge_policy.%s asks for %d. Raise required approvals on %s to %d",
-			main, p.RequiredApprovals, maxEnv, maxApprovals, main, maxApprovals)
+	if len(errs) > 0 {
+		r.Err = errors.New(strings.Join(errs, "; "))
+		return r
 	}
-	if len(autoEnvs) > 0 && p.RequiredApprovals > 0 {
-		r.Warnings = append(r.Warnings, fmt.Sprintf("auto_merge for %s will be blocked by %s's %d required approval(s) unless scriven's account may bypass them",
-			strings.Join(autoEnvs, ", "), main, p.RequiredApprovals))
-	}
-	if r.Err == nil {
-		r.Detail = fmt.Sprintf("%s is protected, PR-only, %d approval(s) required", main, p.RequiredApprovals)
-	}
+	r.Detail = strings.Join(details, "; ")
 	return r
 }
 

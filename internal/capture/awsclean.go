@@ -17,6 +17,7 @@ import (
 var awsKeepZero = map[string]bool{
 	"visibility_timeout_seconds": true, "min_size": true, "max_size": true, "desired_capacity": true,
 	"from_port": true, "to_port": true,
+	"cookie_duration": true,
 }
 
 // Attributes removed from every AWS resource: tags_all repeats tags, and
@@ -27,6 +28,24 @@ var awsDropEverywhere = []string{"tags_all", "region"}
 // attribute. Generated code that keeps them is rejected by the provider.
 var awsDrop = map[string][]string{
 	"aws_subnet": {"availability_zone_id", "map_customer_owned_ip_on_launch"},
+	// Addresses AWS picked from the subnet: pinned, they would clash on replay.
+	"aws_nat_gateway": {"private_ip"},
+	"aws_instance":    {"private_ip"},
+	// The interface of whatever the address is attached to (a NAT gateway's, made
+	// by AWS): the attachment is recorded on that resource.
+	"aws_eip": {"network_interface", "associate_with_private_ip"},
+}
+
+// Per resource type, attributes dropped when they name one of AWS's default
+// groups ("default:postgres-16-3", "default.postgres16"): AWS picks one for
+// the engine version, and the name differs between accounts and versions.
+var awsDropDefaultNamed = map[string][]string{
+	"aws_db_instance": {"option_group_name", "parameter_group_name"},
+}
+
+// Per resource type, nested blocks AWS assigns.
+var awsDropBlocks = map[string][]string{
+	"aws_instance": {"primary_network_interface"}, // the ENI AWS made with the instance
 }
 
 // Differences the first plan after an import always shows for settings that
@@ -35,9 +54,18 @@ var awsProviderOnly = map[string]bool{
 	"force_destroy": true, "force_detach_policies": true, "revoke_rules_on_delete": true, "timeouts": true,
 }
 
+// Settings an import leaves unset that the provider then plans to its default.
+// The first plan after an import shows them; applying changes nothing in AWS.
+var awsImportDefaults = map[string]bool{
+	"lambda_multi_value_headers_enabled": true, "proxy_protocol_v2": true,
+}
+
 func awsNote(_ string, df leafDiff) string {
-	if awsProviderOnly[df.path[0]] {
+	switch {
+	case awsProviderOnly[df.path[0]]:
 		return df.path[0] + " (Terraform-only setting)"
+	case awsImportDefaults[df.path[0]] && df.before == nil && df.after == false:
+		return df.path[0] + " (provider default, unset after import)"
 	}
 	return ""
 }
@@ -70,8 +98,29 @@ func cleanAWS(src []byte, byAddr map[string]awscloud.Item, where awsWhere) ([]by
 				st.removed++
 			}
 		}
+		for _, a := range awsDropDefaultNamed[typ] {
+			if at := body.GetAttribute(a); at != nil && strings.HasPrefix(strings.TrimSpace(string(at.Expr().BuildTokens(nil).Bytes())), `"default`) {
+				body.RemoveAttribute(a)
+				st.removed++
+			}
+		}
+		for _, bt := range awsDropBlocks[typ] {
+			for _, child := range body.Blocks() {
+				if child.Type() == bt {
+					body.RemoveBlock(child)
+					st.removed++
+				}
+			}
+		}
 		nullEmptyStringsInObjects(body)
 		st.removed += pruneEmpty(body, awsKeepZero)
+		st.removed += pruneEmptyBlocks(body)
+		if typ == "aws_lambda_function" {
+			lambdaCode(body)
+		}
+		if typ == "aws_lb" {
+			st.removed += plainSubnetMappings(body)
+		}
 		addr := typ + "." + blk.Labels()[1]
 		blocks[addr] = blk
 		addrs = append(addrs, addr)
@@ -293,4 +342,76 @@ func contains(l []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// pruneEmptyBlocks removes nested blocks left empty by pruning, and blocks
+// that only say enabled = false (an access_logs block with logging off):
+// both are what Terraform assumes when the block is absent, and the provider
+// rejects them for lacking their required arguments.
+func pruneEmptyBlocks(b *hclwrite.Body) int {
+	n := 0
+	for _, child := range b.Blocks() {
+		cb := child.Body()
+		n += pruneEmptyBlocks(cb)
+		attrs := cb.Attributes()
+		off := len(attrs) == 1 && attrs["enabled"] != nil &&
+			strings.TrimSpace(string(attrs["enabled"].Expr().BuildTokens(nil).Bytes())) == "false"
+		if len(cb.Blocks()) == 0 && (len(attrs) == 0 || off) {
+			b.RemoveBlock(child)
+			n++
+		}
+	}
+	return n
+}
+
+// lambdaCode points a captured function at a deployment package to supply:
+// scriven reads a function's configuration, never its code. ignore_changes
+// keeps the plan at zero diff until the file exists; to deploy new code,
+// add source_code_hash = filebase64sha256(...) as usual.
+func lambdaCode(b *hclwrite.Body) {
+	for _, a := range []string{"filename", "s3_bucket", "image_uri"} {
+		if b.GetAttribute(a) != nil {
+			return
+		}
+	}
+	name := strings.Trim(strings.TrimSpace(string(b.GetAttribute("function_name").Expr().BuildTokens(nil).Bytes())), `"`)
+	b.SetAttributeRaw("filename", hclwrite.Tokens{
+		{Type: hclsyntax.TokenOQuote, Bytes: []byte(`"`)},
+		{Type: hclsyntax.TokenQuotedLit, Bytes: []byte("${path.module}/lambda/" + name + ".zip")},
+		{Type: hclsyntax.TokenCQuote, Bytes: []byte(`"`)},
+	})
+	lc := b.AppendNewBlock("lifecycle", nil).Body()
+	lc.SetAttributeRaw("ignore_changes", hclwrite.Tokens{
+		{Type: hclsyntax.TokenOBrack, Bytes: []byte("[")},
+		{Type: hclsyntax.TokenIdent, Bytes: []byte("filename")},
+		{Type: hclsyntax.TokenCBrack, Bytes: []byte("]")},
+	})
+}
+
+// plainSubnetMappings removes a load balancer's subnet_mapping blocks when
+// they only repeat its subnets: the provider accepts one or the other. A
+// mapping with an Elastic IP or a fixed private address is kept, and then
+// subnets goes instead.
+func plainSubnetMappings(b *hclwrite.Body) int {
+	var maps []*hclwrite.Block
+	plain := true
+	for _, child := range b.Blocks() {
+		if child.Type() != "subnet_mapping" {
+			continue
+		}
+		maps = append(maps, child)
+		attrs := child.Body().Attributes()
+		plain = plain && len(attrs) == 1 && attrs["subnet_id"] != nil
+	}
+	if len(maps) == 0 || b.GetAttribute("subnets") == nil {
+		return 0
+	}
+	if !plain {
+		b.RemoveAttribute("subnets")
+		return 1
+	}
+	for _, m := range maps {
+		b.RemoveBlock(m)
+	}
+	return len(maps)
 }

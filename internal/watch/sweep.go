@@ -37,14 +37,15 @@ func (w *Watcher) sweep(ctx context.Context, t config.Target) (int, error) {
 
 	w.libMu.Lock()
 	defer w.libMu.Unlock()
-	repo, err := library.OpenObserved(ctx, w.cfg.Library, w.token)
+	base := w.cfg.BaseBranch(t.Env)
+	repo, err := library.OpenObserved(ctx, w.cfg.Library, w.token, base)
 	if err != nil {
 		return 0, err
 	}
 	defer repo.Close()
 	dir := res.Dir
 	if !repo.Exists(dir + "/main.tf") {
-		return 0, fmt.Errorf("no baseline in the library at %s: run `scriven capture %s` and merge it first", dir, t.ID)
+		return 0, fmt.Errorf("no baseline in the library at %s on %s: run `scriven capture %s` and merge it first", dir, base, t.ID)
 	}
 	oldMain, _ := os.ReadFile(repo.Path(dir + "/main.tf"))
 	if err := os.RemoveAll(repo.Path(dir)); err != nil {
@@ -71,7 +72,7 @@ func (w *Watcher) sweep(ctx context.Context, t config.Target) (int, error) {
 	if err := repo.PushObserved(ctx); err != nil {
 		return 0, err
 	}
-	pr := w.ensurePR(ctx)
+	pr := w.ensurePR(ctx, base)
 	added, changed, removed := compareBlocks(oldMain, res.Files["main.tf"])
 	w.logf("%s: sweep recorded %d new, %d changed, %d removed", t.Key(), len(added), len(changed), len(removed))
 	facts := map[string]string{"environment": t.Env}

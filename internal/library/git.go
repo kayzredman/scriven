@@ -18,10 +18,11 @@ import (
 )
 
 type Repo struct {
-	cfg   config.Library
-	token string
-	dir   string
-	force bool // observed branch was reset to main: next push must be forced
+	cfg      config.Library
+	token    string
+	dir      string
+	force    bool   // observed branch was reset to its base: next push must be forced
+	observed string // name of the observed branch checked out, if any
 }
 
 func defaultUser(provider string) string {
@@ -59,19 +60,69 @@ func (r *Repo) git(ctx context.Context, args ...string) (string, error) {
 	return out.String(), nil
 }
 
-// Clone makes a shallow working copy in a temp directory. Call Close when done.
+// Clone makes a shallow working copy of the main branch in a temp directory.
+// Call Close when done.
 func Clone(ctx context.Context, cfg config.Library, token string) (*Repo, error) {
+	return CloneBase(ctx, cfg, token, cfg.MainBranch())
+}
+
+// CloneBase makes a shallow working copy of base, the branch an environment's
+// captures merge into. A base other than main that does not exist yet is
+// created, empty apart from a README, so it holds only that environment's code.
+func CloneBase(ctx context.Context, cfg config.Library, token, base string) (*Repo, error) {
 	dir, err := os.MkdirTemp("", "scriven-library-")
 	if err != nil {
 		return nil, err
 	}
 	r := &Repo{cfg: cfg, token: token}
-	if _, err := r.git(ctx, "clone", "--depth=1", "--branch", cfg.MainBranch(), cfg.URL, dir); err != nil {
+	_, err = r.git(ctx, "clone", "--depth=1", "--branch", base, cfg.URL, dir)
+	if err == nil {
+		r.dir = dir
+		return r, nil
+	}
+	if base == cfg.MainBranch() {
 		os.RemoveAll(dir)
 		return nil, err
 	}
-	r.dir = dir
+	if out, lerr := r.git(ctx, "ls-remote", "--heads", cfg.URL, base); lerr != nil || strings.TrimSpace(out) != "" {
+		os.RemoveAll(dir)
+		return nil, err // the branch exists: the clone failed for another reason
+	}
+	if err := r.createBase(ctx, dir, base); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("creating library branch %s: %w", base, err)
+	}
 	return r, nil
+}
+
+func (r *Repo) createBase(ctx context.Context, dir, base string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil { // a failed clone may have removed it
+		return err
+	}
+	if _, err := r.git(ctx, "clone", "--depth=1", "--branch", r.cfg.MainBranch(), r.cfg.URL, dir); err != nil {
+		return err
+	}
+	r.dir = dir
+	if _, err := r.git(ctx, "checkout", "-q", "--orphan", base); err != nil {
+		return err
+	}
+	if _, err := r.git(ctx, "rm", "-r", "-q", "-f", "--", "."); err != nil {
+		return err
+	}
+	readme := fmt.Sprintf("# IaC library: %s\n\nThis branch holds the captures of the environments whose `merge_policy` names\n"+
+		"`branch: %s`. Scriven merges them here without approval; environments that need review\nmerge into `%s`.\n",
+		base, base, r.cfg.MainBranch())
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte(readme), 0o644); err != nil {
+		return err
+	}
+	if _, err := r.git(ctx, "add", "README.md"); err != nil {
+		return err
+	}
+	if _, err := r.git(ctx, "commit", "-q", "-m", "start library branch "+base); err != nil {
+		return err
+	}
+	_, err := r.git(ctx, "push", "-q", "origin", "HEAD:refs/heads/"+base)
+	return err
 }
 
 func (r *Repo) Close() { os.RemoveAll(r.dir) }

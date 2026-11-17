@@ -31,6 +31,11 @@ resource "aws_iam_user_policy" "readonly" {
         "iam:Get*", "iam:List*",
         "dynamodb:Describe*", "dynamodb:List*",
         "sns:Get*", "sns:List*",
+        "elasticloadbalancing:Describe*",
+        "rds:Describe*", "rds:ListTagsForResource",
+        "lambda:Get*", "lambda:List*",
+        "kms:Describe*", "kms:List*", "kms:GetKeyPolicy", "kms:GetKeyRotationStatus",
+        "cloudformation:Describe*", "cloudformation:List*",
       ]
       Resource = "*"
     }]

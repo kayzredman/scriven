@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Seed the lab's AWS stand-in (Moto, http://localhost:5000) for scriven:
 #   - sample resources (sample-aws/resources): a VPC, subnets, security groups,
-#     a bucket, an IAM role and policies, a DynamoDB table, an SNS topic
+#     a bucket, an IAM role and policies, a DynamoDB table, an SNS topic, a NAT
+#     gateway and Elastic IP, an EC2 instance, a load balancer with listener and
+#     target group, an RDS instance, a Lambda function and a KMS key
 #   - identities (sample-aws/identities): scriven-readonly and lab-admin, with
 #     their access keys stored in Vault
 #   - then switches Moto's IAM enforcement on, so a write by the read-only

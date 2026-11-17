@@ -96,7 +96,8 @@ func captureCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			repo, err := library.Clone(cmd.Context(), c.Library, token)
+			base := c.BaseBranch(t.Env)
+			repo, err := library.CloneBase(cmd.Context(), c.Library, token, base)
 			if err != nil {
 				return err
 			}
@@ -121,7 +122,7 @@ func captureCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			pr, err := forge.OpenPR(cmd.Context(), branch, c.Library.MainBranch(),
+			pr, err := forge.OpenPR(cmd.Context(), branch, base,
 				fmt.Sprintf("Capture %s (%d resources)", t.Key(), res.Catalog.ResourceCount), prBody(res, stat))
 			switch {
 			case errors.Is(err, library.ErrNoAPI):
@@ -129,7 +130,7 @@ func captureCmd() *cobra.Command {
 			case err != nil:
 				return fmt.Errorf("branch pushed but PR not opened: %w", err)
 			default:
-				fmt.Fprintf(out, "      opened PR #%d: %s\n", pr.Number, pr.URL)
+				fmt.Fprintf(out, "      opened PR #%d into %s: %s\n", pr.Number, base, pr.URL)
 				if closed, err := forge.Supersede(cmd.Context(), prefix, pr); err != nil {
 					fmt.Fprintf(out, "      ! could not close older capture PRs: %v\n", err)
 				} else if len(closed) > 0 {
@@ -182,7 +183,11 @@ func prBody(r *capture.Result, stat string) string {
 	if len(u.HelmReleases)+len(u.UnreadableKinds)+len(u.Skipped) > 0 {
 		b.WriteString("\n**Not captured** (details in `catalog.yaml`):\n")
 		for _, h := range u.HelmReleases {
-			fmt.Fprintf(&b, "- Helm release `%s/%s` (%s, %d objects)\n", h.Namespace, h.Name, h.Chart, h.Objects)
+			chart := h.Chart
+			if h.ChartVersion != "" {
+				chart += " " + h.ChartVersion
+			}
+			fmt.Fprintf(&b, "- Helm release `%s/%s` (chart %s, %d objects)\n", h.Namespace, h.Name, chart, h.Objects)
 		}
 		if len(u.UnreadableKinds) > 0 {
 			fmt.Fprintf(&b, "- Not readable by the read-only identity: %s\n", strings.Join(u.UnreadableKinds, ", "))

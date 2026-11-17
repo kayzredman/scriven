@@ -28,6 +28,14 @@ for f in main.tf providers.tf variables.tf versions.tf .terraform.lock.hcl; do
 done
 # Emulator-only provider settings, kept out of the captured code.
 printf 'provider "aws" {\n  s3_use_path_style = true\n}\n' > "$work/lab_override.tf"
+# What a capture cannot hold, supplied the way an operator would: each
+# function's deployment package, and a master password for each database.
+for fn in $(sed -n 's|.*/lambda/\(.*\)\.zip".*|\1|p' "$work/main.tf"); do
+  mkdir -p "$work/lambda" && cp "$here/sample-aws/resources/fn.zip" "$work/lambda/$fn.zip"
+done
+for db in $(sed -n 's/^resource "aws_db_instance" "\(.*\)" {/\1/p' "$work/main.tf"); do
+  printf 'resource "aws_db_instance" "%s" {\n  password = "replay-only-not-secret"\n}\n' "$db" >> "$work/lab_override.tf"
+done
 cd "$work"
 export AWS_ENDPOINT_URL="$url" HTTP_PROXY="$url" AWS_REGION=eu-west-1 AWS_DEFAULT_REGION=eu-west-1
 export AWS_ACCESS_KEY_ID=replay AWS_SECRET_ACCESS_KEY=replay TF_IN_AUTOMATION=1 CHECKPOINT_DISABLE=1
@@ -35,7 +43,9 @@ unset AWS_PROFILE AWS_SESSION_TOKEN
 cache="$(cd "$here" && pwd -W 2>/dev/null || pwd)/.lab/aws/plugins"
 [[ -d "$here/.lab/aws/plugins" ]] && export TF_PLUGIN_CACHE_DIR="$cache"
 terraform init -input=false -no-color >/dev/null
-terraform apply -input=false -no-color -auto-approve | grep -E '^Apply complete|^Error' || true
+terraform apply -input=false -no-color -auto-approve > apply.txt 2>&1 || true
+grep -E "^Apply complete" apply.txt || true
+grep -A6 "^Error" apply.txt | head -60 || true
 
 echo "==> 3. terraform plan against the rebuilt account"
 set +e
@@ -43,7 +53,7 @@ terraform plan -input=false -no-color -detailed-exitcode > plan.txt 2>&1
 rc=$?
 set -e
 want="$(grep -c '^resource ' main.tf)"
-have="$(terraform state list | wc -l | tr -d ' ')"
+have="$(terraform state list | grep -vc '^data.' || true)"
 if [[ $rc -eq 0 && $want -eq $have ]]; then
   echo "✓ Replay matches: $have of $want resources created, and a new plan shows no changes."
 else

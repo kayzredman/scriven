@@ -168,3 +168,122 @@ resource "aws_s3_bucket" "exports" {
   count  = var.drift ? 1 : 0
   bucket = "shop-exports-lab"
 }
+
+# ---- compute and the services around it ------------------------------------
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+  tags   = { Name = "shop-nat" }
+}
+
+resource "aws_nat_gateway" "shop" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.shop_b.id
+  tags          = { Name = "shop-nat" }
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.shop.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.shop.id
+  }
+  tags = { Name = "shop-private" }
+}
+
+resource "aws_route_table_association" "a" {
+  subnet_id      = aws_subnet.shop_a.id
+  route_table_id = aws_route_table.private.id
+}
+
+data "aws_ami" "base" {
+  most_recent = true
+  owners      = ["amazon"]
+}
+
+resource "aws_instance" "worker" {
+  ami                    = data.aws_ami.base.id
+  instance_type          = "t3.micro"
+  subnet_id              = aws_subnet.shop_a.id
+  vpc_security_group_ids = [aws_security_group.web.id]
+  tags                   = { Name = "shop-worker", team = "payments" }
+}
+
+resource "aws_lb" "web" {
+  name               = "shop-web"
+  load_balancer_type = "application"
+  subnets            = [aws_subnet.shop_a.id, aws_subnet.shop_b.id]
+  security_groups    = [aws_security_group.web.id]
+  tags               = { team = "payments" }
+}
+
+resource "aws_lb_target_group" "web" {
+  name     = "shop-web"
+  port     = 8080
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.shop.id
+  health_check {
+    path = "/healthz"
+  }
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.web.arn
+  port              = 80
+  protocol          = "HTTP"
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.web.arn
+  }
+}
+
+resource "aws_db_subnet_group" "shop" {
+  name       = "shop-db"
+  subnet_ids = [aws_subnet.shop_a.id, aws_subnet.shop_b.id]
+}
+
+resource "aws_db_instance" "orders" {
+  identifier             = "shop-orders-db"
+  engine                 = "postgres"
+  engine_version         = "16.3"
+  instance_class         = "db.t4g.micro"
+  allocated_storage      = 20
+  username               = "shop"
+  password               = "lab-only-not-secret"
+  db_subnet_group_name   = aws_db_subnet_group.shop.name
+  vpc_security_group_ids = [aws_security_group.db.id]
+  skip_final_snapshot    = true
+  tags                   = { team = "payments" }
+}
+
+resource "aws_kms_key" "orders" {
+  description             = "Encrypts order exports"
+  deletion_window_in_days = 7
+  tags                    = { team = "payments" }
+}
+
+resource "aws_kms_alias" "orders" {
+  name          = "alias/shop-orders"
+  target_key_id = aws_kms_key.orders.key_id
+}
+
+resource "aws_iam_role" "fn" {
+  name = "shop-orders-fn"
+  assume_role_policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = "sts:AssumeRole", Principal = { Service = "lambda.amazonaws.com" } }]
+  })
+}
+
+resource "aws_lambda_function" "orders" {
+  function_name = "shop-orders-export"
+  role          = aws_iam_role.fn.arn
+  runtime       = "python3.12"
+  handler       = "index.handler"
+  filename      = "${path.module}/fn.zip"
+  timeout       = 30
+  environment {
+    variables = { TABLE = aws_dynamodb_table.orders.name }
+  }
+  tags = { team = "payments" }
+}

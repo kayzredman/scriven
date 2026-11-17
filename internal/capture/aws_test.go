@@ -228,3 +228,68 @@ resource "aws_sns_topic" "alerts" {
 		t.Error("templated count not reported")
 	}
 }
+
+func TestAWSComputeCleanup(t *testing.T) {
+	src := `resource "aws_lb" "web" {
+  name    = "web"
+  subnets = ["subnet-a", "subnet-b"]
+  access_logs {
+    enabled = false
+  }
+  subnet_mapping {
+    subnet_id = "subnet-a"
+  }
+  subnet_mapping {
+    subnet_id = "subnet-b"
+  }
+}
+
+resource "aws_lb_target_group" "web" {
+  name = "web"
+  stickiness {
+    cookie_duration = 0
+    enabled         = false
+    type            = "lb_cookie"
+  }
+  target_failover {
+    on_deregistration = null
+  }
+}
+
+resource "aws_instance" "worker" {
+  instance_type = "t3.micro"
+  primary_network_interface {
+    network_interface_id = "eni-1"
+  }
+}
+
+resource "aws_lambda_function" "export" {
+  function_name = "export"
+  runtime       = "python3.12"
+}
+
+resource "aws_db_instance" "orders" {
+  identifier           = "orders"
+  option_group_name    = "default:postgres-16-3"
+  parameter_group_name = "orders-tuned"
+}
+`
+	out, _, err := cleanAWS([]byte(src), map[string]awscloud.Item{}, awsWhere{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	for _, gone := range []string{"subnet_mapping", "access_logs", "target_failover", "primary_network_interface", "option_group_name"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("%s should have been removed:\n%s", gone, got)
+		}
+	}
+	for _, kept := range []string{
+		`subnets = ["subnet-a", "subnet-b"]`, "cookie_duration = 0",
+		`filename = "${path.module}/lambda/export.zip"`, "ignore_changes = [filename]", `parameter_group_name = "orders-tuned"`,
+	} {
+		if !strings.Contains(strings.Join(strings.Fields(got), " "), kept) {
+			t.Errorf("missing %q:\n%s", kept, got)
+		}
+	}
+}

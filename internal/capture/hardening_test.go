@@ -95,3 +95,15 @@ func TestSavedLock(t *testing.T) {
 		t.Error("no saved lock with an external cache dir")
 	}
 }
+
+func TestSplitChart(t *testing.T) {
+	for in, want := range map[string][2]string{
+		"ingress-nginx-4.11.3": {"ingress-nginx", "4.11.3"},
+		"redis-19.0.0-rc.1":    {"redis", "19.0.0-rc.1"},
+		"mychart":              {"mychart", ""},
+	} {
+		if n, v := splitChart(in); n != want[0] || v != want[1] {
+			t.Errorf("splitChart(%q) = %q, %q; want %q, %q", in, n, v, want[0], want[1])
+		}
+	}
+}

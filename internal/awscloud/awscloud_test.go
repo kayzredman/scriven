@@ -52,3 +52,21 @@ func TestEnv(t *testing.T) {
 		t.Errorf("a real AWS target must get no emulator settings:\n%s", e)
 	}
 }
+
+func TestLeaveOutManaged(t *testing.T) {
+	inv := &Inventory{Items: []Item{
+		{Type: "aws_vpc", ID: "vpc-1"},
+		{Type: "aws_iam_role", ID: "shop-app"},
+		{Type: "aws_iam_role_policy_attachment", ID: "shop-app/arn:aws:iam::1:policy/p", Owner: "shop-app"},
+		{Type: "aws_eip", ID: "eipalloc-1", AltIDs: []string{"203.0.113.7"}},
+		{Type: "aws_db_instance", ID: "Orders-DB"},
+		{Type: "aws_s3_bucket", ID: "by-hand"},
+	}}
+	inv.leaveOutManaged(map[string]string{"vpc-1": "net", "shop-app": "app", "203.0.113.7": "net", "orders-db": "app"})
+	if len(inv.Items) != 1 || inv.Items[0].ID != "by-hand" {
+		t.Errorf("kept %+v, want only the bucket made by hand", inv.Items)
+	}
+	if inv.Stacks["net"] != 2 || inv.Stacks["app"] != 3 {
+		t.Errorf("stack counts %v, want net=2 app=3", inv.Stacks)
+	}
+}

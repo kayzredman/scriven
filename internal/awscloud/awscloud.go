@@ -7,11 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -24,11 +27,14 @@ type Options struct {
 	AccessKeyID     string // resolved secret, never a reference
 	SecretAccessKey string
 	Endpoint        string // emulators only (Moto, LocalStack)
+	RoleARN         string // role to assume after logging in
+	ExternalID      string
 }
 
 type Client struct {
 	cfg      aws.Config
 	opt      Options
+	creds    aws.Credentials // assumed-role credentials handed to Terraform
 	Region   string
 	Endpoint string
 	Account  string
@@ -54,11 +60,25 @@ func Connect(ctx context.Context, o Options) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("aws: %w", err)
 	}
+	var creds aws.Credentials
+	if o.RoleARN != "" {
+		p := stscreds.NewAssumeRoleProvider(sts.NewFromConfig(cfg), o.RoleARN, func(a *stscreds.AssumeRoleOptions) {
+			a.RoleSessionName = "scriven"
+			a.Duration = time.Hour
+			if o.ExternalID != "" {
+				a.ExternalID = aws.String(o.ExternalID)
+			}
+		})
+		cfg.Credentials = aws.NewCredentialsCache(p)
+		if creds, err = cfg.Credentials.Retrieve(ctx); err != nil {
+			return nil, fmt.Errorf("aws: cannot assume %s: %w", o.RoleARN, err)
+		}
+	}
 	id, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
 		return nil, fmt.Errorf("aws: cannot identify the caller in %s: %w", o.Region, err)
 	}
-	return &Client{cfg: cfg, opt: o, Region: o.Region, Endpoint: o.Endpoint,
+	return &Client{cfg: cfg, opt: o, creds: creds, Region: o.Region, Endpoint: o.Endpoint,
 		Account: aws.ToString(id.Account), ARN: aws.ToString(id.Arn)}, nil
 }
 
@@ -83,11 +103,17 @@ func (c *Client) Where() string {
 // Credentials are passed in the environment only, never written to a file.
 func (c *Client) Env() []string {
 	env := []string{"AWS_REGION=" + c.Region, "AWS_DEFAULT_REGION=" + c.Region}
-	if c.opt.AccessKeyID != "" {
+	switch {
+	case c.creds.AccessKeyID != "":
+		// An assumed role: Terraform gets its temporary credentials (an hour,
+		// longer than any capture), not the role setting, so the library's
+		// provider block needs no account-specific settings.
+		env = append(env, "AWS_ACCESS_KEY_ID="+c.creds.AccessKeyID, "AWS_SECRET_ACCESS_KEY="+c.creds.SecretAccessKey,
+			"AWS_SESSION_TOKEN="+c.creds.SessionToken, "AWS_PROFILE=")
+	case c.opt.AccessKeyID != "":
 		env = append(env, "AWS_ACCESS_KEY_ID="+c.opt.AccessKeyID, "AWS_SECRET_ACCESS_KEY="+c.opt.SecretAccessKey,
 			"AWS_SESSION_TOKEN=", "AWS_PROFILE=")
-	}
-	if c.opt.Profile != "" {
+	case c.opt.Profile != "":
 		env = append(env, "AWS_PROFILE="+c.opt.Profile)
 	}
 	if c.Endpoint != "" {
@@ -116,45 +142,75 @@ func (c *Client) EmulatorOverride() []byte {
 // the services scriven reads, plus reading secret values.
 var mustNotAllow = []string{
 	"ec2:RunInstances", "ec2:TerminateInstances", "ec2:CreateVpc", "ec2:DeleteVpc", "ec2:CreateTags",
-	"ec2:AuthorizeSecurityGroupIngress", "ec2:ModifyInstanceAttribute",
+	"ec2:AuthorizeSecurityGroupIngress", "ec2:ModifyInstanceAttribute", "ec2:ReleaseAddress", "ec2:DeleteNatGateway",
 	"s3:CreateBucket", "s3:DeleteBucket", "s3:PutObject", "s3:DeleteObject", "s3:PutBucketPolicy",
 	"iam:CreateUser", "iam:CreateAccessKey", "iam:PutRolePolicy", "iam:AttachRolePolicy", "iam:PassRole",
 	"dynamodb:PutItem", "dynamodb:DeleteTable", "sns:DeleteTopic", "sns:SetTopicAttributes",
-	"lambda:UpdateFunctionCode", "rds:DeleteDBInstance", "cloudformation:CreateStack",
+	"lambda:UpdateFunctionCode", "lambda:InvokeFunction", "rds:DeleteDBInstance", "rds:ModifyDBInstance",
+	"elasticloadbalancing:DeleteLoadBalancer", "elasticloadbalancing:ModifyListener",
+	"kms:ScheduleKeyDeletion", "kms:PutKeyPolicy", "cloudformation:CreateStack", "cloudformation:DeleteStack",
 	"secretsmanager:GetSecretValue", "kms:Decrypt",
+}
+
+// Actions that read stored data rather than configuration. AWS's own
+// ReadOnlyAccess policy grants them, so by default an identity that has them
+// is accepted with a warning; a target with metadata_only refuses it.
+var dataReads = []string{
+	"s3:GetObject", "dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "sqs:ReceiveMessage",
+	"ssm:GetParameter", "logs:GetLogEvents",
+}
+
+// ReadOnly is the outcome of the read-only check.
+type ReadOnly struct {
+	Bad       []string // writes or secret reads the identity may make: refuse
+	DataReads []string // data the identity may read (see dataReads)
+	// DataChecked is false when the check could not look at data reads
+	// (the dry-run fallback only covers writes).
+	DataChecked bool
+	Method      string // how the check was done, for catalog.yaml
 }
 
 // ReadOnlyViolations proves the identity cannot write, without writing.
 //
 // First choice is IAM policy simulation, which evaluates the identity's real
-// policies against every action in mustNotAllow. Where simulation is not
-// available (the identity may not call it, or an emulator does not have it),
-// it falls back to EC2 dry-run requests: AWS answers whether the call would
-// be allowed and changes nothing. The second return value says which was used.
-func (c *Client) ReadOnlyViolations(ctx context.Context) (bad []string, method string, err error) {
+// policies against every action in mustNotAllow and dataReads. Where
+// simulation is not available (the identity may not call it, or an emulator
+// does not have it), it falls back to EC2 dry-run requests: AWS answers
+// whether the call would be allowed and changes nothing.
+func (c *Client) ReadOnlyViolations(ctx context.Context) (ReadOnly, error) {
 	if strings.HasSuffix(c.ARN, ":root") {
-		return []string{"it is the account root user"}, "identity", nil
+		return ReadOnly{Bad: []string{"it is the account root user"}, Method: "identity"}, nil
 	}
-	bad, simErr := c.simulate(ctx)
+	allowed, simErr := c.simulate(ctx, append(append([]string{}, mustNotAllow...), dataReads...))
 	if simErr == nil {
-		return bad, fmt.Sprintf("IAM policy simulation of %d write and secret-read actions", len(mustNotAllow)), nil
+		r := ReadOnly{DataChecked: true,
+			Method: fmt.Sprintf("IAM policy simulation of %d write, secret-read and data-read actions", len(mustNotAllow)+len(dataReads))}
+		for _, a := range allowed {
+			if slices.Contains(dataReads, a) {
+				r.DataReads = append(r.DataReads, a)
+			} else {
+				r.Bad = append(r.Bad, "may "+a)
+			}
+		}
+		return r, nil
 	}
-	bad, err = c.dryRun(ctx)
+	bad, err := c.dryRun(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot verify the identity is read-only: IAM simulation failed (%v) and so did the dry-run check: %w",
+		return ReadOnly{}, fmt.Errorf("cannot verify the identity is read-only: IAM simulation failed (%v) and so did the dry-run check: %w",
 			short(simErr), err)
 	}
-	return bad, "EC2 dry-run requests only (IAM policy simulation unavailable: " + short(simErr) + ")", nil
+	return ReadOnly{Bad: bad, Method: "EC2 dry-run requests only (IAM policy simulation unavailable: " + short(simErr) + ")"}, nil
 }
 
-func (c *Client) simulate(ctx context.Context) ([]string, error) {
+// simulate returns the actions the identity's policies allow.
+func (c *Client) simulate(ctx context.Context, actions []string) ([]string, error) {
 	src := policySourceARN(c.ARN)
 	if src == "" {
 		return nil, fmt.Errorf("cannot simulate policies for %s", c.ARN)
 	}
 	p := iam.NewSimulatePrincipalPolicyPaginator(iam.NewFromConfig(c.cfg), &iam.SimulatePrincipalPolicyInput{
-		PolicySourceArn: aws.String(src), ActionNames: mustNotAllow})
-	var bad []string
+		PolicySourceArn: aws.String(src), ActionNames: actions})
+	var allowed []string
 	for p.HasMorePages() {
 		page, err := p.NextPage(ctx)
 		if err != nil {
@@ -162,11 +218,11 @@ func (c *Client) simulate(ctx context.Context) ([]string, error) {
 		}
 		for _, r := range page.EvaluationResults {
 			if r.EvalDecision == "allowed" {
-				bad = append(bad, "may "+aws.ToString(r.EvalActionName))
+				allowed = append(allowed, aws.ToString(r.EvalActionName))
 			}
 		}
 	}
-	return bad, nil
+	return allowed, nil
 }
 
 // policySourceARN turns a caller ARN into the IAM user or role ARN that

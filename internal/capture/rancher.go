@@ -54,10 +54,24 @@ type Skipped struct {
 }
 
 type HelmRelease struct {
-	Name      string `yaml:"name"`
-	Namespace string `yaml:"namespace"`
-	Chart     string `yaml:"chart,omitempty"`
-	Objects   int    `yaml:"objects"`
+	Name         string `yaml:"name"`
+	Namespace    string `yaml:"namespace"`
+	Chart        string `yaml:"chart,omitempty"`
+	ChartVersion string `yaml:"chart_version,omitempty"`
+	AppVersion   string `yaml:"app_version,omitempty"`
+	Objects      int    `yaml:"objects"`
+}
+
+// splitChart splits Helm's helm.sh/chart label, "<name>-<version>", at the
+// first dash followed by a digit (chart names rarely contain one; versions
+// such as 1.2.3-rc.1 may contain dashes).
+func splitChart(label string) (name, version string) {
+	for i := 0; i+1 < len(label); i++ {
+		if label[i] == '-' && label[i+1] >= '0' && label[i+1] <= '9' {
+			return label[:i], label[i+1:]
+		}
+	}
+	return label, ""
 }
 
 type Discovery struct {
@@ -135,7 +149,9 @@ func (f Filter) Decide(r k8s.Resource, o unstructured.Unstructured) Decision {
 		if relNS != "" && excludedNamespace(relNS, f.ExcludeNamespaces) {
 			return Decision{Verdict: Ignore} // cluster-scoped part of a system chart, e.g. k3s's Traefik
 		}
-		return Decision{Verdict: Helm, Release: HelmRelease{Name: rel, Namespace: relNS, Chart: o.GetLabels()["helm.sh/chart"]}}
+		chart, version := splitChart(o.GetLabels()["helm.sh/chart"])
+		return Decision{Verdict: Helm, Release: HelmRelease{Name: rel, Namespace: relNS, Chart: chart, ChartVersion: version,
+			AppVersion: o.GetLabels()["app.kubernetes.io/version"]}}
 	}
 	if _, ok := typedResources[r.GVR.Group+"/"+r.Kind]; !ok {
 		return Decision{Verdict: Skip, Reason: "no typed Terraform resource for " + r.APIVersion() + " " + r.Kind}
@@ -176,7 +192,10 @@ func DiscoverKubernetes(ctx context.Context, c *k8s.Client, f Filter) (*Discover
 					helm[k] = h
 				}
 				if h.Chart == "" {
-					h.Chart = dec.Release.Chart
+					h.Chart, h.ChartVersion = dec.Release.Chart, dec.Release.ChartVersion
+				}
+				if h.AppVersion == "" {
+					h.AppVersion = dec.Release.AppVersion
 				}
 				h.Objects++
 			case Capture:

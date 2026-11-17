@@ -74,6 +74,27 @@ type Target struct {
 	AccessKeyID     string `yaml:"access_key_id,omitempty"`     // secret reference
 	SecretAccessKey string `yaml:"secret_access_key,omitempty"` // secret reference
 	Endpoint        string `yaml:"endpoint,omitempty"`          // emulators only (Moto, LocalStack)
+	// AWS: a role to assume after logging in, the usual way to reach another
+	// account. ExternalID is the value the role's trust policy may require.
+	RoleARN    string `yaml:"role_arn,omitempty"`
+	ExternalID string `yaml:"external_id,omitempty"`
+	// AWS: refuse an identity that can read data (S3 objects, table items,
+	// queue messages, parameters), not just configuration. Off: such access is
+	// reported as a warning in catalog.yaml.
+	MetadataOnly bool `yaml:"metadata_only,omitempty"`
+	// AWS: whether this target captures account-wide resources (IAM). Default
+	// true. With several targets for one account, set false on all but one, so
+	// IAM is captured once.
+	GlobalResources *bool `yaml:"global_resources,omitempty"`
+}
+
+// CapturesGlobal reports whether an AWS target captures account-wide resources.
+func (t Target) CapturesGlobal() bool { return t.GlobalResources == nil || *t.GlobalResources }
+
+// credentialKey identifies the login an AWS target uses, to spot several
+// targets for the same account.
+func (t Target) credentialKey() string {
+	return strings.Join([]string{t.Profile, t.AccessKeyID, t.RoleARN, t.Endpoint}, "|")
 }
 
 // Key is how targets are referred to, e.g. "rancher/prod-sim".
@@ -114,6 +135,19 @@ type SMTP struct {
 type MergeRule struct {
 	Approvals int  `yaml:"approvals,omitempty"`
 	AutoMerge bool `yaml:"auto_merge,omitempty"`
+	// Library branch this environment's captures and observed changes merge
+	// into. Empty means library.branch (main). Git hosts set required approvals
+	// per branch, so an auto-merged environment needs its own branch when main
+	// requires approvals for another.
+	Branch string `yaml:"branch,omitempty"`
+}
+
+// BaseBranch is the library branch an environment's captures merge into.
+func (c *Config) BaseBranch(env string) string {
+	if b := c.Rule(env).Branch; b != "" {
+		return b
+	}
+	return c.Library.MainBranch()
 }
 
 type Vault struct {
@@ -204,6 +238,7 @@ func (c *Config) Validate() error {
 		add("scope.targets: at least one target is required")
 	}
 	seen := map[string]bool{}
+	globalBy := map[string]string{} // AWS login -> target capturing IAM
 	for i, t := range c.Scope.Targets {
 		p := fmt.Sprintf("scope.targets[%d]", i)
 		if !slices.Contains(Platforms, t.Platform) {
@@ -232,6 +267,18 @@ func (c *Config) Validate() error {
 			}
 			if t.Profile != "" && t.AccessKeyID != "" {
 				add("%s: choose profile or access keys, not both", p)
+			}
+			if t.ExternalID != "" && t.RoleARN == "" {
+				add("%s.external_id: only used with role_arn", p)
+			}
+			if t.RoleARN != "" && !strings.HasPrefix(t.RoleARN, "arn:") {
+				add("%s.role_arn: %q is not an ARN such as arn:aws:iam::123456789012:role/scriven-readonly", p, t.RoleARN)
+			}
+			if t.CapturesGlobal() {
+				if prev, dup := globalBy[t.credentialKey()]; dup {
+					add("%s: targets %s and %s log in the same way, so both would capture the account's IAM. Set global_resources: false on one of them", p, prev, t.Key())
+				}
+				globalBy[t.credentialKey()] = t.Key()
 			}
 		}
 		if seen[t.Key()] {
@@ -302,6 +349,9 @@ func (c *Config) Validate() error {
 		}
 		if r.Approvals < 0 {
 			add("merge_policy.%s.approvals: must be 0 or more", env)
+		}
+		if b := r.Branch; b == "observed" || strings.HasPrefix(b, "observed-") || strings.HasPrefix(b, "capture/") {
+			add("merge_policy.%s.branch: %q is a name scriven uses for its own branches", env, b)
 		}
 	}
 	return errors.Join(errs...)

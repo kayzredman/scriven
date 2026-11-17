@@ -353,14 +353,15 @@ func (tw *targetWatch) record(ctx context.Context, evs []event) error {
 	w.libMu.Lock()
 	defer w.libMu.Unlock()
 
-	repo, err := library.OpenObserved(ctx, w.cfg.Library, w.token)
+	base := w.cfg.BaseBranch(t.Env)
+	repo, err := library.OpenObserved(ctx, w.cfg.Library, w.token, base)
 	if err != nil {
 		return err
 	}
 	defer repo.Close()
 	dir := capture.LibraryDir(t)
 	if !repo.Exists(dir + "/main.tf") {
-		return fmt.Errorf("no baseline in the library at %s: run `scriven capture %s` and merge it first", dir, t.ID)
+		return fmt.Errorf("no baseline in the library at %s on %s: run `scriven capture %s` and merge it first", dir, base, t.ID)
 	}
 
 	// Re-capture only the objects that were added or changed.
@@ -419,7 +420,7 @@ func (tw *targetWatch) record(ctx context.Context, evs []event) error {
 	if err := repo.PushObserved(ctx); err != nil {
 		return err
 	}
-	pr := w.ensurePR(ctx)
+	pr := w.ensurePR(ctx, base)
 	for _, o := range done {
 		w.logf("%s: recorded %s (%s) by %s", t.Key(), o.addr, label(o.expected), o.who)
 		w.metrics.Add("scriven_changes_recorded_total", 1, "target", t.Key(), "label", map[bool]string{true: "expected", false: "drift"}[o.expected])
@@ -497,16 +498,20 @@ func objID(u unstructured.Unstructured) string {
 	return u.GetName()
 }
 
-func (w *Watcher) ensurePR(ctx context.Context) library.PR {
-	pr, ok, err := w.forge.FindOpenPR(ctx, library.ObservedBranch)
+func (w *Watcher) ensurePR(ctx context.Context, base string) library.PR {
+	head := library.ObservedBranchFor(w.cfg.Library, base)
+	pr, ok, err := w.forge.FindOpenPR(ctx, head)
 	if err == nil && ok {
 		return pr
 	}
 	if err != nil && err != library.ErrNoAPI {
 		w.logf("could not look up the observed PR: %v", err)
 	}
-	pr, err = w.forge.OpenPR(ctx, library.ObservedBranch, w.cfg.Library.MainBranch(),
-		"Observed changes (drift)",
+	title := "Observed changes (drift)"
+	if base != w.cfg.Library.MainBranch() {
+		title += " for " + base
+	}
+	pr, err = w.forge.OpenPR(ctx, head, base, title,
 		"Changes scriven's watcher saw in the live environments, one commit per resource.\n\n"+
 			"Merge to accept them into the library, or revert them in the cluster and close this PR.\n"+
 			"Each commit message says what changed and who changed it.")

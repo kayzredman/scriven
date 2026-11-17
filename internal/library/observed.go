@@ -9,44 +9,59 @@ import (
 	"scriven/internal/config"
 )
 
-// ObservedBranch holds what the watcher saw. It is merged into main by PR
-// after review, and restarted from main once that happens.
+// ObservedBranch holds what the watcher saw for environments that merge into
+// main. It is merged into main by PR after review, and restarted from main
+// once that happens. Environments with their own base branch get their own
+// observed branch (see ObservedBranchFor).
 const ObservedBranch = "observed"
 
+// ObservedBranchFor names the observed branch for a base branch: "observed"
+// for main, "observed-<base>" for any other.
+func ObservedBranchFor(cfg config.Library, base string) string {
+	if base == "" || base == cfg.MainBranch() {
+		return ObservedBranch
+	}
+	return ObservedBranch + "-" + base
+}
+
 // OpenObserved clones the library with history and checks out the observed
-// branch: it continues the branch while it has unmerged commits, and starts
-// it again from main once those have been merged.
-func OpenObserved(ctx context.Context, cfg config.Library, token string) (*Repo, error) {
+// branch for base: it continues the branch while it has unmerged commits, and
+// starts it again from base once those have been merged.
+func OpenObserved(ctx context.Context, cfg config.Library, token, base string) (*Repo, error) {
+	if base == "" {
+		base = cfg.MainBranch()
+	}
 	dir, err := os.MkdirTemp("", "scriven-library-")
 	if err != nil {
 		return nil, err
 	}
-	r := &Repo{cfg: cfg, token: token}
-	if _, err := r.git(ctx, "clone", "--branch", cfg.MainBranch(), cfg.URL, dir); err != nil {
+	obs := ObservedBranchFor(cfg, base)
+	r := &Repo{cfg: cfg, token: token, observed: obs}
+	if _, err := r.git(ctx, "clone", "--branch", base, cfg.URL, dir); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
 	}
 	r.dir = dir
-	main := "origin/" + cfg.MainBranch()
-	if _, err := r.git(ctx, "fetch", "origin", ObservedBranch+":refs/remotes/origin/"+ObservedBranch); err != nil {
-		// No observed branch yet: start it from main.
-		_, err = r.git(ctx, "checkout", "-q", "-b", ObservedBranch, main)
+	from := "origin/" + base
+	if _, err := r.git(ctx, "fetch", "origin", obs+":refs/remotes/origin/"+obs); err != nil {
+		// No observed branch yet: start it from base.
+		_, err = r.git(ctx, "checkout", "-q", "-b", obs, from)
 		return r, err
 	}
-	if _, err := r.git(ctx, "merge-base", "--is-ancestor", "origin/"+ObservedBranch, main); err == nil {
-		// Everything observed so far is in main: start again from main (a fast-forward).
-		_, err = r.git(ctx, "checkout", "-q", "-B", ObservedBranch, main)
+	if _, err := r.git(ctx, "merge-base", "--is-ancestor", "origin/"+obs, from); err == nil {
+		// Everything observed so far is in base: start again from it (a fast-forward).
+		_, err = r.git(ctx, "checkout", "-q", "-B", obs, from)
 		return r, err
 	}
-	if _, err := r.git(ctx, "checkout", "-q", "-B", ObservedBranch, "origin/"+ObservedBranch); err != nil {
+	if _, err := r.git(ctx, "checkout", "-q", "-B", obs, "origin/"+obs); err != nil {
 		return nil, err
 	}
-	// Keep observed current with main (e.g. a capture PR merged meanwhile).
-	if _, err := r.git(ctx, "merge", "-q", "--no-edit", main); err != nil {
-		// Conflicting edits to the same files: main wins, and the next sweep
-		// re-detects anything that still differs from the cluster.
+	// Keep observed current with base (e.g. a capture PR merged meanwhile).
+	if _, err := r.git(ctx, "merge", "-q", "--no-edit", from); err != nil {
+		// Conflicting edits to the same files: base wins, and the next sweep
+		// re-detects anything that still differs from the live environment.
 		_, _ = r.git(ctx, "merge", "--abort")
-		if _, err := r.git(ctx, "checkout", "-q", "-B", ObservedBranch, main); err != nil {
+		if _, err := r.git(ctx, "checkout", "-q", "-B", obs, from); err != nil {
 			return nil, err
 		}
 		r.force = true
@@ -88,9 +103,13 @@ func (r *Repo) Commit(ctx context.Context, dir, message string) (bool, error) {
 	return err == nil, err
 }
 
-// PushObserved pushes the observed branch (forced only after a reset to main).
+// PushObserved pushes the observed branch (forced only after a reset to its base).
 func (r *Repo) PushObserved(ctx context.Context) error {
-	args := []string{"push", "-q", "origin", "HEAD:refs/heads/" + ObservedBranch}
+	obs := r.observed
+	if obs == "" {
+		obs = ObservedBranch
+	}
+	args := []string{"push", "-q", "origin", "HEAD:refs/heads/" + obs}
 	if r.force {
 		args = append(args, "--force")
 	}
