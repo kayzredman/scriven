@@ -50,7 +50,7 @@ The online Blueprint and Whiteboard still describe the tfk8s / manifest route fo
 - **Namespace `scriven-system`** is excluded from capture, like `scriven`.
 - **Lab:** `lab-incluster.sh` deploys into `prod-sim` and watches both clusters. Pods can't resolve Docker container names, so the overlay pins them with `hostAliases`. `lab-audit-target.sh host|cluster` switches where the API servers send audit events. It restarts each k3d server and then its load balancer, because a restarted server can get a new IP and the load balancer keeps forwarding to the old one (which may now belong to the other cluster).
 - **Speed:** in-cluster on Linux, a change is recorded in about 6–10 seconds after the debounce. On the Windows host it took about 35 seconds.
-- **Not done yet:** image publishing to a registry or CI, and an egress NetworkPolicy (addresses are site-specific).
+- **Not done yet:** an egress NetworkPolicy (addresses are site-specific). Image publishing and CI: done 2026-11-17, see below.
 
 ## Phase 2 build: AWS capture (2026-11-17)
 
@@ -106,3 +106,9 @@ The online Blueprint and Whiteboard still describe the tfk8s / manifest route fo
   - Auto Scaling-launched instances, Aurora cluster members, AWS-managed KMS keys and the default DB subnet group are left out and listed.
 - **Lab Moto now carries five patches** (`scriven-lab/moto/Dockerfile`): S3 Control signing (earlier); Lambda GET requests failing signature checks under IAM enforcement (Moto signed the headers as if they were the body); NAT gateways missing `availabilityMode`, which provider 6.x reads as a regional NAT gateway with no subnet; instances launched with a network-interface spec reporting no security groups; and `ModifyInstanceAttribute` for the shutdown behaviour falling through to the security-group handler and wiping the instance's groups (found because the replay, unlike the seed, sets that attribute).
 - **Real sandbox:** its `scriven-readonly` user predates the new types, so ELB, RDS, Lambda, KMS and CloudFormation show as unreadable there until the stack is updated with the new template. The new types have not been created in real AWS, because NAT gateways, load balancers and RDS cost money by the hour.
+
+## CI (2026-11-17)
+
+- **GitHub Actions** (`.github/workflows/ci.yml`): on every push to `dev` or `main` and every PR, `gofmt -l`, `go vet`, `go test -race` and a build. On a push to `main` or a `v*` tag, the image is built and pushed to `ghcr.io/<owner>/<repo>` (tags: short SHA, `latest` on main, the version on tags), using `GITHUB_TOKEN` and the Actions build cache. `dev` pushes skip the image because it downloads about 1 GB of providers.
+- **Unit tests need no Terraform, cluster or emulator**, so CI runs them on a bare runner. The lab acceptance checks stay manual.
+- Verified before the first run: the same steps pass in `golang:1.27` on Linux, including the race detector (this Windows host has no C compiler for `-race`).

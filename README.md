@@ -30,6 +30,7 @@ All lab acceptance checks pass.
 | `scriven-lab/` | Docker test lab and the scripts that seed it, run the replay check and deploy Scriven into it |
 | `Dockerfile` | Container image: the CLI, Terraform and the pinned Kubernetes and AWS providers, with no downloads at run time |
 | `deploy/` | Kustomize base for running in a cluster: watcher Deployment, sweep CronJob, audit webhook Service |
+| `.github/workflows/ci.yml` | CI: format check, vet, race-enabled tests and build on every push and PR; on `main`, publishes the image to `ghcr.io/<owner>/<repo>` |
 
 ## Build
 
@@ -39,6 +40,8 @@ Needs Go 1.25+, Terraform 1.5+ and git on `PATH`.
 go build -o bin/scriven ./cmd/scriven     # bin/scriven.exe on Windows
 go test ./...
 ```
+
+CI runs the same on GitHub for every push and pull request, plus a `gofmt` check and the race detector. Each push to `main` (and each `v*` tag) also builds the container image and publishes it to GitHub's container registry as `ghcr.io/<owner>/<repo>`, tagged with the short commit SHA and `latest` (or the version). The package starts private; make it public, or give your cluster a pull secret.
 
 ## Commands
 
