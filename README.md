@@ -6,7 +6,7 @@ Captures deployed infrastructure (Rancher on-prem, AWS, Azure, GCP) as Terraform
 
 - **Rancher/Kubernetes:** done. The setup wizard, the one-shot capture, and the watcher with its sweeper all work, and Scriven also runs inside a cluster as a Deployment plus a nightly CronJob.
 - **AWS:** capture and sweep work for 25 resource types, from VPCs to load balancers, RDS, Lambda and KMS. Tested against the Moto emulator in the lab. A real AWS sandbox account passed the full read-only check (IAM policy simulation) and a zero-diff capture that leaves out CloudFormation-managed resources. Live watching follows CloudTrail's event history, so changes arrive within minutes.
-- **Azure and GCP:** not built.
+- **Azure and GCP:** not built yet, parked until there are real accounts to test against (no emulator covers them). The plan and what unblocks each is under "Parked gaps" in `notes/project-memory.md`; `scriven-lab/gcp-real/setup.sh` prepares a free GCP sandbox project.
 
 All lab acceptance checks pass.
 

@@ -128,3 +128,17 @@ The online Blueprint and Whiteboard still describe the tfk8s / manifest route fo
 - **CloudFormation's own calls are skipped** by the AWS watcher (see AWS live watching).
 - **HPA changes re-check the workload they scale,** both the old and new `scaleTargetRef`, so the Deployment is re-captured with or without `spec.replicas` at once. Tested in the lab: adding an HPA to `shop/web` recorded the HPA and the Deployment without `replicas`. The in-cluster image (older) recorded only the HPA, which showed the gap.
 - **Observed-branch pushes retry after a rejection** (see Phase 3, library flow).
+
+## Parked gaps (2026-11-18)
+
+Decided on 2026-11-18: these are parked, not dropped. For now the focus is QA and hardening what works (Rancher, AWS on Moto and the real sandbox, the watcher), then new ideas. Come back to this list before calling Scriven complete.
+
+| Gap | State | What unblocks it |
+|---|---|---|
+| **GCP capture** | Not built. `scriven-lab/gcp-real/setup.sh` (Cloud Shell) is ready: it creates a free sample set (VPC, 2 subnets, 2 firewall rules, bucket, Pub/Sub topic and subscription, a service account) and a metadata-only `scriven-readonly` service account, key into Vault at `secret/scriven/gcp-real`. Plan: same pattern as AWS: read-only check with `testIamPermissions`, discovery through Cloud Asset Inventory, clean-up rules, zero-diff check. | A real GCP project (free trial). No emulator exists for Compute, IAM, Cloud Storage or Asset Inventory; the lab's GCP emulator is Pub/Sub only. |
+| **Azure capture** | Not built. Plan: discovery through Azure Resource Graph, a Reader-role identity, same pipeline. | An Azure subscription (free account). No emulator beyond Azurite (storage only). |
+| **AWS compute types on real AWS** | EC2 instances, NAT gateways, load balancers and RDS pass on Moto (capture and replay) but have never run on real AWS. | User approval for a short-lived paid stack (one `t3.micro`, one `db.t4g.micro`, about cents an hour), deleted straight after. |
+| **AWS replay into a second real account** | Tested on Moto only. | A second sandbox account. |
+| **AWS live-watching console test** | The watcher ran against the real sandbox, followed CloudTrail and handled CloudFormation's calls correctly, but the planned console changes (bucket versioning, an SNS topic `watch-test`) were never made, so attribution of a person's change on real AWS is untested. | 10 minutes in the console while the watcher runs. |
+| **Faster AWS feed** | Optional: EventBridge → SQS would bring delivery from minutes to seconds. | Creating a rule and a queue in each account (a few cents a month); a design decision. |
+| **GitHub CI** | The workflow is in place but GitHub does not start jobs: the account is locked over billing. | The user fixes billing, then Actions → ci → Run workflow. |
