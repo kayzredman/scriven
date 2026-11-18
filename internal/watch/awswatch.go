@@ -96,6 +96,12 @@ func (aw *awsWatch) fetch(ctx context.Context, since time.Time) {
 			continue
 		}
 		aw.seen[e.ID] = e.At
+		if e.Agent == "CloudFormation" {
+			// A stack doing its own work: its resources are left out of the
+			// capture, so re-capturing for this could never record anything.
+			aw.w.logf("%s: %s %s by %s (skipped: stack resources are not captured)", aw.t.Key(), e.Source, e.Name, who(e))
+			continue
+		}
 		aw.pending = append(aw.pending, e)
 		aw.quiet = time.Now().Add(aw.debounce)
 		aw.w.logf("%s: %s %s by %s", aw.t.Key(), e.Source, e.Name, who(e))

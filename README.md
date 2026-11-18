@@ -5,7 +5,7 @@ Captures deployed infrastructure (Rancher on-prem, AWS, Azure, GCP) as Terraform
 **Status:**
 
 - **Rancher/Kubernetes:** done. The setup wizard, the one-shot capture, and the watcher with its sweeper all work, and Scriven also runs inside a cluster as a Deployment plus a nightly CronJob.
-- **AWS:** capture and sweep work for 25 resource types, from VPCs to load balancers, RDS, Lambda and KMS. Tested against the Moto emulator in the lab. The read-only check and a zero-diff capture of the first 14 types also passed in one real AWS sandbox account. Live watching is not built.
+- **AWS:** capture and sweep work for 25 resource types, from VPCs to load balancers, RDS, Lambda and KMS. Tested against the Moto emulator in the lab. A real AWS sandbox account passed the full read-only check (IAM policy simulation) and a zero-diff capture that leaves out CloudFormation-managed resources. Live watching follows CloudTrail's event history, so changes arrive within minutes.
 - **Azure and GCP:** not built.
 
 All lab acceptance checks pass.
@@ -111,7 +111,7 @@ One target is one account and region. The six steps are the same as for a cluste
 5. **Verify:** `terraform plan` against the live account must show no changes.
 6. **Commit:** as for a cluster. The library holds no credentials and no endpoint.
 
-**Live watching for AWS:** `scriven watch` reads each AWS target's CloudTrail event history every minute (`watch.aws_poll`). Every account keeps 90 days of this history for free, and no trail is needed. Only successful write calls to the captured services count. Calls to IAM are read from `us-east-1`, where CloudTrail records them. After a burst of calls goes quiet, Scriven re-captures the target in full and checks it at zero diff. It then commits each resource whose code changed separately on the observed branch, naming the CloudTrail caller that touched it, e.g. `user/alice via console`, with the API call and its time. Calls made by Terraform are labelled as expected changes. CloudTrail takes a few minutes to show a call, so changes arrive within minutes, not seconds. The identity needs `cloudtrail:LookupEvents`. Without it, or on an emulator, the target is covered by sweeps only, and the watcher says so at start-up.
+**Live watching for AWS:** `scriven watch` reads each AWS target's CloudTrail event history every minute (`watch.aws_poll`). Every account keeps 90 days of this history for free, and no trail is needed. Only successful write calls to the captured services count. Calls CloudFormation makes for its own stacks are skipped, since stack resources are not captured; a person changing a stack resource directly still counts. Calls to IAM are read from `us-east-1`, where CloudTrail records them. After a burst of calls goes quiet, Scriven re-captures the target in full and checks it at zero diff. It then commits each resource whose code changed separately on the observed branch, naming the CloudTrail caller that touched it, e.g. `user/alice via console`, with the API call and its time. Calls made by Terraform are labelled as expected changes. CloudTrail takes a few minutes to show a call, so changes arrive within minutes, not seconds. The identity needs `cloudtrail:LookupEvents`. Without it, or on an emulator, the target is covered by sweeps only, and the watcher says so at start-up.
 
 
 ## Running in a cluster

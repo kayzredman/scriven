@@ -2,6 +2,7 @@ package library
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,6 +114,22 @@ func (r *Repo) PushObserved(ctx context.Context) error {
 	if r.force {
 		args = append(args, "--force")
 	}
-	_, err := r.git(ctx, args...)
+	var err error
+	// Another scriven (the in-cluster watcher and its nightly sweep, say) may
+	// push to the same branch between our clone and our push. Replay our
+	// commits on top of theirs and try again. A commit with the same change
+	// as one of theirs drops out of the rebase on its own.
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err = r.git(ctx, args...); err == nil || r.force {
+			return err
+		}
+		if _, ferr := r.git(ctx, "fetch", "-q", "origin", "+refs/heads/"+obs+":refs/remotes/origin/"+obs); ferr != nil {
+			return err
+		}
+		if _, rerr := r.git(ctx, "rebase", "-q", "origin/"+obs); rerr != nil {
+			_, _ = r.git(ctx, "rebase", "--abort")
+			return fmt.Errorf("%w; rebasing onto the branch's new commits also failed (the same files changed on both sides), so the next sweep will record what still differs", err)
+		}
+	}
 	return err
 }

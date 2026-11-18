@@ -161,6 +161,13 @@ type targetWatch struct {
 	timers  map[string]*time.Timer
 	ready   chan string
 	hpa     cache.Store
+	// Deployments and StatefulSets, so a change to an HPA can re-check the workload it scales.
+	scaled map[string]scaledKind
+}
+
+type scaledKind struct {
+	res   k8s.Resource
+	store cache.Store
 }
 
 func (w *Watcher) newTargetWatch(ctx context.Context, t config.Target) (*targetWatch, error) {
@@ -170,7 +177,7 @@ func (w *Watcher) newTargetWatch(ctx context.Context, t config.Target) (*targetW
 	}
 	s.Quiet()
 	tw := &targetWatch{w: w, s: s, debounce: w.cfg.Watch.DebounceDuration(),
-		hashes: map[string]string{}, pending: map[string]event{}, timers: map[string]*time.Timer{},
+		hashes: map[string]string{}, scaled: map[string]scaledKind{}, pending: map[string]event{}, timers: map[string]*time.Timer{},
 		ready: make(chan string, 1024)}
 	s.Autoscaled = func(d capture.Discovered) bool { return tw.autoscaled(d.Res, &d.Obj) }
 	return tw, nil
@@ -199,10 +206,16 @@ func (tw *targetWatch) run(ctx context.Context) {
 		if r.Kind == "HorizontalPodAutoscaler" {
 			tw.hpa = inf.GetStore()
 		}
+		if r.Kind == "Deployment" || r.Kind == "StatefulSet" {
+			tw.scaled[r.Kind] = scaledKind{res: r, store: inf.GetStore()}
+		}
 		_, _ = inf.AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc:    func(o any) { tw.observe("added", r, o) },
-			UpdateFunc: func(_, o any) { tw.observe("changed", r, o) },
-			DeleteFunc: func(o any) { tw.observe("removed", r, o) },
+			AddFunc: func(o any) { tw.observe("added", r, o); tw.rescale(r, o) },
+			UpdateFunc: func(old, o any) {
+				tw.observe("changed", r, o)
+				tw.rescale(r, old, o)
+			},
+			DeleteFunc: func(o any) { tw.observe("removed", r, o); tw.rescale(r, o) },
 		})
 		syncs = append(syncs, inf.HasSynced)
 		kinds++
@@ -321,6 +334,37 @@ func (tw *targetWatch) autoscaled(r k8s.Resource, u *unstructured.Unstructured) 
 		}
 	}
 	return false
+}
+
+// rescale re-checks the workloads an HPA scales (before and after the
+// change) when the HPA is added, edited or removed. Whether a Deployment or
+// StatefulSet is autoscaled decides whether its code carries spec.replicas,
+// so its hash changes and it is re-captured without waiting for a sweep.
+func (tw *targetWatch) rescale(r k8s.Resource, objs ...any) {
+	if r.Kind != "HorizontalPodAutoscaler" {
+		return
+	}
+	seen := map[string]bool{}
+	for _, o := range objs {
+		if d, ok := o.(cache.DeletedFinalStateUnknown); ok {
+			o = d.Obj
+		}
+		h, ok := o.(*unstructured.Unstructured)
+		if !ok {
+			continue
+		}
+		kind, _, _ := unstructured.NestedString(h.Object, "spec", "scaleTargetRef", "kind")
+		name, _, _ := unstructured.NestedString(h.Object, "spec", "scaleTargetRef", "name")
+		sk, ok := tw.scaled[kind]
+		key := h.GetNamespace() + "/" + name
+		if !ok || name == "" || seen[kind+"|"+key] {
+			continue
+		}
+		seen[kind+"|"+key] = true
+		if obj, exists, err := sk.store.GetByKey(key); err == nil && exists {
+			tw.observe("changed", sk.res, obj)
+		}
+	}
 }
 
 // ---- turning changes into library commits ----
