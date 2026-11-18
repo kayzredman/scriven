@@ -59,8 +59,8 @@ func (w *Watcher) sweep(ctx context.Context, t config.Target) (int, error) {
 			return 0, err
 		}
 	}
-	msg := fmt.Sprintf("sweep %s: %d resources, zero diff\n\nFull re-capture by scriven's sweeper found differences from the library.",
-		t.Key(), res.Catalog.ResourceCount)
+	msg := fmt.Sprintf("sweep %s: %s, zero diff\n\nFull re-capture by scriven's sweeper found differences from the library.",
+		t.Key(), capture.Count(res.Catalog.ResourceCount, "resource"))
 	committed, err := repo.Commit(ctx, dir, msg)
 	if err != nil {
 		return 0, err

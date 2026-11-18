@@ -98,10 +98,10 @@ func runAWS(ctx context.Context, t config.Target, opt Options) (*Result, error) 
 	for _, n := range inv.Stacks {
 		inStacks += n
 	}
-	say(1, fmt.Sprintf("found %d resources to capture, %d managed by %d CloudFormation stack(s) and %d others left out (see catalog.yaml)",
-		len(inv.Items), inStacks, len(inv.Stacks), len(inv.Skipped)))
+	say(1, fmt.Sprintf("found %s to capture, %d managed by %s and %s left out (see catalog.yaml)",
+		Count(len(inv.Items), "resource"), inStacks, Count(len(inv.Stacks), "CloudFormation stack"), Count(len(inv.Skipped), "other")))
 	if len(inv.Items) == 0 {
-		return nil, fmt.Errorf("nothing to capture in %s (%d resources are managed by CloudFormation stacks)", t.Key(), inStacks)
+		return nil, fmt.Errorf("nothing to capture in %s (all %s found are managed by CloudFormation stacks)", t.Key(), Count(inStacks, "resource"))
 	}
 
 	tfv, err := TerraformVersion(ctx)
@@ -188,7 +188,7 @@ func runAWS(ctx context.Context, t config.Target, opt Options) (*Result, error) 
 		if genErr != nil {
 			return nil, genErr
 		}
-		return nil, fmt.Errorf("terraform imported none of the %d resources", len(inv.Items))
+		return nil, fmt.Errorf("terraform imported none of the %s", Count(len(inv.Items), "resource"))
 	}
 	files["imports.tf"] = awsImports(byAddr)
 	files["main.tf"] = main

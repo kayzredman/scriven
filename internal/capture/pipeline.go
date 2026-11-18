@@ -252,8 +252,8 @@ func Run(ctx context.Context, t config.Target, opt Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.say(1, fmt.Sprintf("found %d objects to capture, %d Helm release(s) and %d other objects left out (see catalog.yaml)",
-		len(d.Objects), len(d.HelmReleases), len(d.Skipped)))
+	s.say(1, fmt.Sprintf("found %s to capture, %s and %s left out (see catalog.yaml)",
+		Count(len(d.Objects), "object"), Count(len(d.HelmReleases), "Helm release"), Count(len(d.Skipped), "other object")))
 	if len(d.Objects) == 0 {
 		return nil, fmt.Errorf("nothing to capture in %s", t.Key())
 	}

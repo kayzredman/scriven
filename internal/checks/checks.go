@@ -100,7 +100,7 @@ func awsTarget(ctx context.Context, cfg *config.Config, t config.Target, r Resul
 	if strings.HasPrefix(method, "EC2 dry-run") {
 		r.Warnings = append(r.Warnings, "read-only check used "+method+"; allow iam:SimulatePrincipalPolicy for the full check")
 	}
-	r.Detail = fmt.Sprintf("%s as %s: can read %d resources, cannot write", c.Where(), c.ARN, len(inv.Items))
+	r.Detail = fmt.Sprintf("%s as %s: can read %s, cannot write", c.Where(), c.ARN, capture.Count(len(inv.Items), "resource"))
 	return r
 }
 

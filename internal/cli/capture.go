@@ -105,8 +105,8 @@ func captureCmd() *cobra.Command {
 			// capture/<env>/<id>/<time>: the prefix identifies the target unambiguously.
 			prefix := fmt.Sprintf("capture/%s/%s/", t.Env, t.ID)
 			branch := prefix + time.Now().UTC().Format("20060102-150405")
-			msg := fmt.Sprintf("capture %s: %d resources, zero diff\n\nCaptured by scriven %s as %s.\nTerraform %s, providers %v.",
-				res.Dir, res.Catalog.ResourceCount, capture.ToolVersion, res.Catalog.Source.Identity, res.Catalog.Terraform, res.Catalog.Providers)
+			msg := fmt.Sprintf("capture %s: %s, zero diff\n\nCaptured by scriven %s as %s.\nTerraform %s, providers %v.",
+				res.Dir, capture.Count(res.Catalog.ResourceCount, "resource"), capture.ToolVersion, res.Catalog.Source.Identity, res.Catalog.Terraform, res.Catalog.Providers)
 			changed, err := repo.CommitFiles(cmd.Context(), branch, res.Dir, res.Files, msg)
 			if err != nil {
 				return err
@@ -123,7 +123,7 @@ func captureCmd() *cobra.Command {
 				return err
 			}
 			pr, err := forge.OpenPR(cmd.Context(), branch, base,
-				fmt.Sprintf("Capture %s (%d resources)", t.Key(), res.Catalog.ResourceCount), prBody(res, stat))
+				fmt.Sprintf("Capture %s (%s)", t.Key(), capture.Count(res.Catalog.ResourceCount, "resource")), prBody(res, stat))
 			switch {
 			case errors.Is(err, library.ErrNoAPI):
 				fmt.Fprintf(out, "      open a PR from %s by hand (provider \"git\" has no API)\n", branch)
@@ -155,7 +155,7 @@ func captureCmd() *cobra.Command {
 			}
 			if err := n.Send(cmd.Context(), notify.Message{
 				Title: "Capture ready for review: " + t.Key(),
-				Text:  fmt.Sprintf("Scriven captured %d resources and verified zero diff against the live environment.", res.Catalog.ResourceCount),
+				Text:  fmt.Sprintf("Scriven captured %s and verified zero diff against the live environment.", capture.Count(res.Catalog.ResourceCount, "resource")),
 				Facts: facts, Link: pr.URL, Detail: stat,
 			}); err != nil {
 				fmt.Fprintf(out, "      ! notification failed: %v\n", err)
